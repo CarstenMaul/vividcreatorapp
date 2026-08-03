@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VividCreator App — Build web apps by chatting with AI</title>
+  <meta name="description" content="VividCreator App is a self-hostable platform for building full-stack web applications through conversation: describe your app in chat, watch it run in a live preview, and deploy it anywhere.">
+  <link rel="icon" type="image/svg+xml" href="img/favicon.svg">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="js/lightbox.js" defer></script>
+  <script src="js/contact.js" defer></script>
+  <script src="js/version.js" defer></script>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <rect width="64" height="64" rx="14" fill="#ffffff" fill-opacity="0.12"/>
+        <path d="M16 18 L32 48 L48 18" fill="none" stroke="#ffffff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      VividCreator&nbsp;<span class="brand-suffix">App</span>
+    </a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="#how-it-works">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#gallery">Gallery</a>
+      <a href="#tech">Technology</a>
+      <a href="#open-source">Open source</a>
+      <a href="#get-started">Get started</a>
+    </nav>
+    <a class="btn btn-on-dark header-cta" href="https://vividcreator.app">vividcreator.app</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="container">
+      <p class="hero-eyebrow">VividCreator App</p>
+      <h1>Build your own app. Your creativity, your automation.</h1>
+      <p class="hero-sub">Describe what you want in chat — VividCreator App writes the code and shows you the running app live. Iterate until it's right, then deploy it anywhere. All from your own infrastructure.</p>
+      <div class="cta-group">
+        <a class="btn" href="#get-started">Get started</a>
+        <a class="btn btn-secondary" href="#gallery">See it in action</a>
+      </div>
+      <figure class="hero-media">
+        <img class="shot" src="img/chat-live-preview.png" alt="VividCreator App with the chat panel on the left and a generated interactive solar-system app running in the live preview" width="1920" height="1032">
+        <figcaption>The chat drives the code — the live preview shows your app running while it's being written.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- How it works -->
+  <section id="how-it-works">
+    <div class="container">
+      <div class="section-head">
+        <h2>From idea to app in three steps</h2>
+      </div>
+      <div class="steps">
+        <div class="step">
+          <span class="step-num">1</span>
+          <h3>Describe it</h3>
+          <p>Tell the agent what to build, in plain language. It scaffolds a complete, real codebase — full-stack or pure client-side.</p>
+        </div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <h3>Watch it run</h3>
+          <p>A live preview shows the running app the moment code is written. Ask for changes and the agent iterates with you.</p>
+        </div>
+        <div class="step">
+          <span class="step-num">3</span>
+          <h3>Ship it</h3>
+          <p>Package a desktop app, push a git release, or export a single HTML file — every project is yours to download and deploy.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Showcase -->
+  <section class="band-dark" id="showcase">
+    <div class="container">
+      <div class="section-head">
+        <h2>From a prompt to a polished app</h2>
+        <p class="section-sub">An interactive journey through 13.8 billion years — described in chat, built by the agent, running full-screen in VividCreator App.</p>
+      </div>
+      <figure>
+        <img class="shot" src="img/generated-app-fullscreen.png" alt="A generated app called Cosmic Genesis showing an animated cosmic-expansion timeline, running full-screen in VividCreator App" width="1920" height="1032" loading="lazy">
+      </figure>
+    </div>
+  </section>
+
+  <!-- Feature rows -->
+  <section class="band-white" id="features">
+    <div class="container">
+
+      <div class="feature-row">
+        <div class="feature-copy">
+          <h3>Every app is a project</h3>
+          <p>Organize apps into folders, filter, reopen, and pick up where you left off. Each project is a complete codebase you can preview, download as a zip, and deploy — with its cost visible at a glance.</p>
+        </div>
+        <figure class="feature-media">
+          <img class="shot" src="img/projects-overview.png" alt="The projects overview with apps organized into folders such as Education, Games, and Tools, each project showing its accumulated cost" loading="lazy">
+        </figure>
+      </div>
+
+      <div class="feature-row reverse">
+        <div class="feature-copy">
+          <h3>Versioned and connected from day one</h3>
+          <p>Each project carries its own version, deployment target, and git remote. Create a repository on GitHub or Azure DevOps — or connect an existing one — without leaving the app.</p>
+        </div>
+        <figure class="feature-media">
+          <img class="shot" src="img/project-settings.png" alt="Project settings showing the deployment target, version control profile with repository URL, and automatic version numbering" loading="lazy">
+        </figure>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-copy">
+          <h3>Ship it your way</h3>
+          <p>Package a Windows, macOS, or Linux desktop app, tag and push a git release, or export a client-side app as a zip or one self-contained HTML file — straight from the Deploy dialog.</p>
+        </div>
+        <figure class="feature-media">
+          <img class="shot" src="img/deploy-desktop.png" alt="The Deploy dialog packaging the app as a Windows installer, portable exe, macOS, or Linux desktop app" loading="lazy">
+        </figure>
+      </div>
+
+      <div class="feature-row reverse">
+        <div class="feature-copy">
+          <h3>One file, whole app</h3>
+          <p>Client-side apps export as a single HTML file with CSS, JavaScript, images, and fonts inlined — it opens offline, from anywhere. That covers everything from small tools to complete branded presentations.</p>
+        </div>
+        <figure class="feature-media">
+          <img class="shot" src="img/app-fullscreen.png" alt="A generated interactive solar-system app running full screen — client-side apps like this export as one self-contained HTML file" loading="lazy">
+        </figure>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-copy">
+          <h3>Bring your own model</h3>
+          <p>Anthropic, OpenAI (API key), OpenAI Codex via supported ChatGPT plans, Azure OpenAI and AI Foundry, OpenRouter, or a local OpenAI-compatible server. Save provider setups as profiles and switch model and thinking effort in Settings.</p>
+        </div>
+        <figure class="feature-media">
+          <img class="shot" src="img/model-settings.png" alt="The AI model configuration in Settings with provider profiles, an Azure OpenAI endpoint, a model catalog with Browse models, and context window overrides" loading="lazy">
+        </figure>
+      </div>
+
+      <div class="feature-row reverse">
+        <div class="feature-copy">
+          <h3>Requirements and diagrams that keep up</h3>
+          <p>Track requirements per project alongside auto-maintained UML and ER diagrams — use-case, component, activity, deployment, and entity-relationship views that evolve with the code.</p>
+        </div>
+        <figure class="feature-media">
+          <img class="shot" src="img/diagrams-use-case.png" alt="The Architect view with an auto-generated use-case diagram for a housekeeping app, alongside tabs for deployment, component, activity, and ER diagrams" loading="lazy">
+        </figure>
+      </div>
+
+      <div class="feature-row">
+        <div class="feature-copy">
+          <h3>Point at what you want changed</h3>
+          <p>Grab a screenshot of the running app, draw and type right on it, and attach it to the chat — or describe an edit and let the AI change the image itself.</p>
+        </div>
+        <figure class="feature-media">
+          <img class="shot" src="img/screenshot-annotator.png" alt="The built-in annotator with shapes and text drawn over a screenshot of the running app, ready to attach to the chat" loading="lazy">
+        </figure>
+      </div>
+
+      <div class="feature-row reverse">
+        <div class="feature-copy">
+          <h3>It asks before it builds</h3>
+          <p>For a new app, the agent asks what the first version should focus on and who will use it — pick an option and it builds the right app from the start, visible live while it works.</p>
+        </div>
+        <figure class="feature-media">
+          <img class="shot" src="img/guided-build.png" alt="The agent asking which focus and audience the first version should target, while the generated dashboard takes shape in the live preview" loading="lazy">
+        </figure>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- More in the box -->
+  <section id="more">
+    <div class="container">
+      <div class="section-head">
+        <h2>More in the box</h2>
+      </div>
+      <div class="card-grid">
+        <div class="card">
+          <h3>Skills</h3>
+          <p>Package your conventions and design systems as reusable skills the agent applies on demand.</p>
+        </div>
+        <div class="card">
+          <h3>MCP tools</h3>
+          <p>Connect Model Context Protocol servers to extend what the agent can do, managed centrally.</p>
+        </div>
+        <div class="card">
+          <h3>Web search &amp; fetch</h3>
+          <p>Built-in tools let the agent research and pull in documentation while it works.</p>
+        </div>
+        <div class="card">
+          <h3>Images &amp; app icons</h3>
+          <p>Generate images and project icons from a prompt, or annotate a screenshot and edit it with AI.</p>
+        </div>
+        <div class="card">
+          <h3>Multi-user workspaces</h3>
+          <p>Per-user projects, sharing between colleagues, and public projects for the whole team.</p>
+        </div>
+        <div class="card">
+          <h3>Enterprise sign-in</h3>
+          <p>Optional Microsoft Entra ID sign-in with group-based access control and an admin console.</p>
+        </div>
+        <div class="card">
+          <h3>Cost tracking</h3>
+          <p>Per-project and per-day token costs, split by model, down to input, output, and cached tokens.</p>
+        </div>
+        <div class="card">
+          <h3>Five languages</h3>
+          <p>The UI ships in English, German, French, Italian, and Polish — switchable in Settings.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Gallery -->
+  <section class="band-white band-plain" id="gallery">
+    <div class="container">
+      <div class="section-head">
+        <h2>A closer look — a project's workflow</h2>
+        <p class="section-sub">One project from first prompt to shipped installer.</p>
+      </div>
+      <div class="gallery-grid">
+        <figure>
+          <img src="img/project-creation.png" alt="A brand-new project where the agent asks what the first version should focus on and who will use it" loading="lazy">
+          <figcaption>1 · Create — describe the app; the agent asks what the first version should focus on.</figcaption>
+        </figure>
+        <figure>
+          <img src="img/generated-roster-app.png" alt="The generated hotel housekeeping planner showing a full weekly roster with shifts per team member" loading="lazy">
+          <figcaption>2 · Build — a complete housekeeping planner, generated and refined in chat.</figcaption>
+        </figure>
+        <figure>
+          <img src="img/roster-personal-schedule.png" alt="The same generated app signed in as a housekeeper, showing a personal weekly schedule" loading="lazy">
+          <figcaption>3 · Use — every role gets its own view; here, a housekeeper's schedule.</figcaption>
+        </figure>
+        <figure>
+          <img src="img/diagrams-er.png" alt="An auto-maintained entity-relationship diagram of the generated app in the Architect view" loading="lazy">
+          <figcaption>4 · Understand — diagrams evolve with the code as the app grows.</figcaption>
+        </figure>
+        <figure>
+          <img src="img/commit-history.png" alt="The commit history of a project with tagged versions, per-commit file changes, and a rollback button" loading="lazy">
+          <figcaption>5 · Version — every build is a tagged commit you can roll back.</figcaption>
+        </figure>
+        <figure>
+          <img src="img/deploy-desktop.png" alt="The Deploy to Electron dialog offering a Windows installer, a portable app, macOS, and Linux packages" loading="lazy">
+          <figcaption>6 · Ship — package the app as its own installer for Windows, macOS, or Linux.</figcaption>
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <!-- Tech -->
+  <section class="band-dark" id="tech">
+    <div class="container">
+      <div class="section-head">
+        <h2>Under the hood</h2>
+        <p class="section-sub">An open TypeScript stack you can read, run, and audit — no database server, no proprietary runtime, no lock-in.</p>
+      </div>
+      <div class="tech-grid">
+        <div class="tech-card">
+          <h3>The platform</h3>
+          <p>One Express server drives the agent, projects, and previews; a React single-page app renders chat, live preview, diagrams, and admin. All state lives in plain files under a single data root — no database to operate.</p>
+          <ul class="tech-tags">
+            <li>TypeScript</li>
+            <li>Node.js 24</li>
+            <li>Express 5</li>
+            <li>React 19</li>
+            <li>Vite 8</li>
+          </ul>
+        </div>
+        <div class="tech-card">
+          <h3>The agent</h3>
+          <p>The coding agent builds on the open pi coding agent and talks to whichever model you configure. Skills, MCP servers, and built-in web search and fetch extend what it can do; a separately configured image model covers app art and icons.</p>
+          <ul class="tech-tags">
+            <li>pi coding agent</li>
+            <li>Anthropic</li>
+            <li>OpenAI</li>
+            <li>Azure OpenAI &amp; AI Foundry</li>
+            <li>OpenRouter</li>
+            <li>MCP</li>
+          </ul>
+        </div>
+        <div class="tech-card">
+          <h3>The apps it builds</h3>
+          <p>Full-stack projects pair an Express API with a Vite-built React and Tailwind frontend; client-side projects are plain HTML, CSS, and JavaScript. Every app is self-contained source code with no CDN imports — it runs offline and is yours.</p>
+          <ul class="tech-tags">
+            <li>Node.js + Express</li>
+            <li>React 19</li>
+            <li>Tailwind CSS</li>
+            <li>HTML / CSS / JS</li>
+          </ul>
+        </div>
+        <div class="tech-card">
+          <h3>Packaging &amp; delivery</h3>
+          <p>VCA and every generated app package as desktop apps with electron-builder, bundling their own Node and Git runtime so end users install nothing. The server ships as a multi-stage Docker image; git releases push to GitHub or Azure DevOps.</p>
+          <ul class="tech-tags">
+            <li>Electron 42</li>
+            <li>electron-builder</li>
+            <li>Docker</li>
+            <li>Git</li>
+            <li>GitHub · Azure DevOps</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Open source -->
+  <section class="band-white" id="open-source">
+    <div class="container open-source-inner">
+      <span class="open-source-badge">
+        <svg class="open-source-icon" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path d="M12 .5C5.73.5.5 5.73.5 12c0 5.09 3.29 9.4 7.86 10.93.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.03 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.76.12 3.05.74.8 1.19 1.83 1.19 3.08 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.15 0 1.55-.01 2.8-.01 3.18 0 .31.21.68.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z"/></svg>
+      </span>
+      <h2>Open source on GitHub</h2>
+      <p class="section-sub">VividCreator App is MIT-licensed and developed in the open — read the source, file an issue, or send a pull request.</p>
+      <a class="btn btn-github" href="https://github.com/CarstenMaul/vividcreatorapp" target="_blank" rel="noopener">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M12 .5C5.73.5.5 5.73.5 12c0 5.09 3.29 9.4 7.86 10.93.58.11.79-.25.79-.56 0-.28-.01-1.02-.02-2-3.2.7-3.88-1.54-3.88-1.54-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.17.08 1.78 1.2 1.78 1.2 1.03 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.73-1.55-2.55-.29-5.23-1.28-5.23-5.68 0-1.25.45-2.28 1.19-3.08-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11.1 11.1 0 0 1 5.79 0c2.2-1.49 3.17-1.18 3.17-1.18.64 1.59.24 2.76.12 3.05.74.8 1.19 1.83 1.19 3.08 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.15 0 1.55-.01 2.8-.01 3.18 0 .31.21.68.8.56A11.5 11.5 0 0 0 23.5 12C23.5 5.73 18.27.5 12 .5z"/></svg>
+        View on GitHub
+      </a>
+    </div>
+  </section>
+
+  <!-- Get started -->
+  <section id="get-started">
+    <div class="container">
+      <div class="section-head">
+        <h2>Get the app</h2>
+      </div>
+      <div class="cta-group download-group">
+        <a class="btn btn-download" data-href-template="https://vividcreator.app/downloads/VCA-{version}-setup-x64.exe">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5.1 10.6 4v7.5H3V5.1zm0 13.8 7.6 1.1v-7.4H3v6.3zM11.4 3.9 21 2.5v9h-9.6V3.9zm0 16.2 9.6 1.4v-9h-9.6v7.6z"/></svg>
+          Download for Windows
+        </a>
+        <a class="btn btn-download" data-href-template="https://vividcreator.app/downloads/VCA-{version}-arm64.dmg">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.03 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+          Download for macOS (arm)
+        </a>
+        <a class="btn btn-download" data-href-template="https://vividcreator.app/downloads/VCA-{version}-x64.dmg">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.03 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></svg>
+          Download for macOS (intel)
+        </a>
+      </div>
+      <p class="download-note">Current VCA Version: <span data-version></span> · Windows 10/11 installer · macOS on Apple silicon and intel</p>
+      <div class="run-grid">
+        <div class="run-card">
+          <h3>Locally</h3>
+          <p>Start it with one script on your own machine and build in the browser.</p>
+        </div>
+        <div class="run-card">
+          <h3>In Docker</h3>
+          <p>One container, ready for a shared team server — with multi-user workspaces built in.</p>
+        </div>
+        <div class="run-card">
+          <h3>As a desktop app</h3>
+          <p>A self-contained install for Windows, macOS, and Linux — nothing else to set up.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <p class="footer-disclaimer">VividCreator App (VCA) is provided under the MIT License, "as is," with no warranty of fitness for a particular purpose, error-free operation, or security; mandatory statutory liability (e.g. for intent or gross negligence) remains unaffected. AI-generated output can be wrong — review it before any production, security-sensitive, or compliance-relevant use; the software does not provide legal, security, or compliance advice. You are responsible for the applications you build with VCA and for the data they process, including compliance with applicable law. Connected AI providers (Anthropic, OpenAI, Azure, OpenRouter, etc.) are independent third parties whose own terms, pricing, and privacy policies apply. All product names and trademarks mentioned are the property of their respective owners; their use does not imply affiliation, sponsorship, or endorsement.</p>
+    <div class="footer-inner">
+      <span><a href="legal-notice.html">Legal Notice</a> · <a href="privacy.html">Privacy Policy</a> · <a class="email-protect" href="#" data-code="99,97,114,115,116,101,110,95,109,97,117,108,64,103,109,120,46,100,101" rel="nofollow">Contact</a> · <a href="https://vividcreator.app">vividcreator.app</a> · <a href="https://github.com/CarstenMaul/vividcreatorapp" target="_blank" rel="noopener">GitHub</a> · Released under the MIT License</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

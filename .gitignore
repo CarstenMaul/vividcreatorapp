@@ -1,0 +1,51 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local workspace data (default WORKSPACES_ROOT used by start scripts)
+.vca-data/
+.vca-data-docker/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build
+dist/
+dist-electron/
+dist-web/
+release/
+*.egg-info/
+# NOTE: `build/` is electron-builder's buildResources dir (installer.nsh, icons),
+# i.e. tracked source — do NOT ignore it.
+
+# Docker
+.docker/
+
+# Bundled runtime (Node + Git on Windows, per-arch Node on macOS) downloaded
+# at build time by scripts/bundle-runtime.mjs
+/resources/runtime/*
+!/resources/runtime/.gitkeep
+/resources/runtime-mac/*
+!/resources/runtime-mac/.gitkeep
+/.cache/
+
+# Claude Code local state (settings.local.json, plans, nested skill repos)
+.claude/
+
+# Local scratch area (template sources, verification scripts — never shipped)
+/temp/

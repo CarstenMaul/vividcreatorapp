@@ -1,0 +1,27 @@
+diff --git a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js b/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
+index 705d9aa..d7655df 100644
+--- a/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
++++ b/node_modules/@earendil-works/pi-ai/dist/api/openai-codex-responses.js
+@@ -1211,7 +1211,7 @@ function extractAccountId(token) {
+         const parts = token.split(".");
+         if (parts.length !== 3)
+             throw new Error("Invalid token");
+-        const payload = JSON.parse(atob(parts[1]));
++        const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+         const accountId = payload?.[JWT_CLAIM_PATH]?.chatgpt_account_id;
+         if (!accountId)
+             throw new Error("No account ID in token");
+diff --git a/node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-codex.js b/node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-codex.js
+index 5275b3b..ea7b099 100644
+--- a/node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-codex.js
++++ b/node_modules/@earendil-works/pi-ai/dist/auth/oauth/openai-codex.js
+@@ -75,7 +75,8 @@ function decodeJwt(token) {
+         if (parts.length !== 3)
+             return null;
+         const payload = parts[1] ?? "";
+-        const decoded = atob(payload);
++        // JWT payloads are base64url; Node's atob rejects '-'/'_' (Bun's does not).
++        const decoded = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
+         return JSON.parse(decoded);
+     }
+     catch {

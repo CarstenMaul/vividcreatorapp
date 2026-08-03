@@ -1,0 +1,116 @@
+appId: com.vca.app
+productName: VCA
+copyright: Copyright VCA
+
+directories:
+  buildResources: build
+  output: release
+
+# Source tree to bundle into the app. dist/ is the compiled server, dist-electron/
+# is the compiled main process, dist-web/ is the Vite-built SPA, defaults/ are
+# bundled seeds. package.json is required so Node's loader reads "type": "module".
+# app-config.json must be explicit because the YAML allowlist disables electron-
+# builder's implicit catch-all; src/app-name-config.ts reads it at runtime.
+files:
+  - dist/**
+  - dist-electron/**
+  - dist-web/**
+  - defaults/**
+  - app-config.json
+  - package.json
+  - "!**/*.map"
+  - "!**/*.ts"
+
+# Asar can't be read with fs recursive scans, and express.static needs direct
+# filesystem access to dist-web/ — so seed and SPA assets are unpacked into
+# resources/app.asar.unpacked/{defaults,dist-web} where the server resolves
+# them via process.resourcesPath.
+asar: true
+asarUnpack:
+  - defaults/**
+  - dist-web/**
+
+# Rebuild native modules (bcrypt) against Electron's bundled Node ABI.
+npmRebuild: true
+
+# App/installer icon: build/icon.png is the website favicon
+# (other/website/img/favicon.svg) rasterized to 1024×1024. electron-builder
+# derives the platform formats from it (win .ico for the exe + NSIS
+# installer, mac .icns, linux AppImage icon).
+
+win:
+  icon: build/icon.png
+  # Self-contained toolchain: ship a private Node + Git (populated by
+  # scripts/bundle-runtime.mjs via `dist:win`) so the installed app needs no
+  # system Node/Git. Lands at <app>/resources/runtime/{node,git}; resolved at
+  # runtime by src/bundled-runtime.ts. Scoped to `win:` ON PURPOSE — these are
+  # Windows binaries; mac ships its own Node from resources/runtime-mac (see
+  # `mac:` below) and linux runs in containers. A clean checkout has only a
+  # .gitkeep here.
+  extraResources:
+    - from: resources/runtime
+      to: runtime
+  target:
+    - target: nsis
+      arch: x64
+  artifactName: VCA-${version}-setup-${arch}.${ext}
+
+# Assisted (multi-page) per-user installer → %LOCALAPPDATA%\Programs\VCA, no
+# admin required. The installed app runs VCA.exe directly from the install dir
+# (not the old self-extracting `portable` stub that re-unpacked ~650MB to %TEMP%
+# on every launch). Wizard flow (see build/installer.nsh): Welcome (what VCA
+# installs) → choose folder → install with a visible file log → Finish.
+#   - oneClick:false                       → show the wizard pages, not a bare bar
+#   - allowToChangeInstallationDirectory   → let the user pick the install folder
+#   - customInstallMode (installer.nsh)    → force per-user, skip the all-users page
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
+
+mac:
+  icon: build/icon.png
+  # Ship a private Node (populated by scripts/bundle-runtime.mjs via `dist:mac`)
+  # so the installed app needs no system Node — a Finder-launched app's PATH
+  # misses nvm/homebrew installs anyway. ${arch} picks the matching darwin
+  # build per DMG; it lands at <app>/Contents/Resources/runtime/node and is
+  # resolved at runtime by src/bundled-runtime.ts (POSIX layout: node/bin/node).
+  # Unlike Windows, git/bash are NOT bundled — macOS provides /usr/bin/git and
+  # /bin/bash.
+  extraResources:
+    - from: resources/runtime-mac/${arch}
+      to: runtime
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  artifactName: VCA-${version}-${arch}.${ext}
+  category: public.app-category.developer-tools
+  # Code signing + Gatekeeper. hardenedRuntime is electron-builder's default,
+  # but we pin it explicitly since notarization requires it. The entitlements
+  # below match what the working signed build already ships (JIT for V8, plus
+  # library-validation disabled so the bundled Node + rebuilt native addons
+  # load under the hardened runtime); entitlementsInherit applies them to
+  # nested executables such as resources/runtime/node.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarization is done as a separate step (scripts/notarize-mac.mjs, run via
+  # `npm run notarize:mac`) against the finished DMGs, so a slow or flaky Apple
+  # notary run never forces a full rebuild. Keep it off here so electron-builder
+  # doesn't also try to notarize when Apple credentials are present in the env.
+  notarize: false
+
+linux:
+  icon: build/icon.png
+  target:
+    - target: AppImage
+      arch: x64
+  artifactName: VCA-${version}-${arch}.${ext}
+  category: Development

@@ -1,0 +1,9 @@
+# The name deliberately matches the directory name: existing projects store
+# the template's display name, so renaming it would orphan their references.
+name: "default-app-template"
+description: ""
+# Default deployment target stamped into new projects, per server runtime.
+# On desktop installs new apps deploy as Electron apps; in container mode
+# the target stays unconfigured until an admin picks one per project.
+deploymentOption:
+  electron: "electron"

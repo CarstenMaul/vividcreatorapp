@@ -1,0 +1,4 @@
+name: "Client-side web app"
+description: "Pure client-side app (HTML/CSS/JS in public/, no backend). Deploys as a static zip or a single self-contained HTML file."
+appType: "web"
+deploymentOption: "web-export"

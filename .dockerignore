@@ -1,0 +1,23 @@
+# Reinstalled / rebuilt inside the image
+node_modules
+
+# Build outputs (the multi-stage build regenerates dist/ + dist-web/)
+dist
+dist-web
+dist-electron
+release
+
+# Desktop-only bundled runtime (~280MB Node + Git) — never needed in the container
+resources
+.cache
+
+# VCS / local data / secrets / editor
+.git
+.gitignore
+.vca-data
+.vca-data-docker
+.docker
+.claude
+.env
+*.log
+npm-debug.log*

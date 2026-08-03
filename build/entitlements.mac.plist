@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Chromium/V8 use JIT, so hardened runtime must permit executable memory. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!-- Required because the app bundles a private Node runtime
+         (Contents/Resources/runtime, signed by the Node.js Foundation) and
+         loads native addons (bcrypt) rebuilt against Electron's ABI. Under a
+         hardened runtime, library validation would otherwise reject binaries
+         and .node modules not signed by this app's Team ID. These entitlements
+         match what the existing, working signed build already ships with.
+         Applied to nested executables via entitlementsInherit. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
