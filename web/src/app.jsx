@@ -608,8 +608,8 @@ async function api(path, options = {}) {
 
 // Client-side file download for content that can't ride a GET URL (e.g. the
 // encrypted config export, whose password travels in a POST body).
-function downloadJsonFile(filename, obj) {
-  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+function downloadTextFile(filename, text, mime = "text/plain") {
+  const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -618,6 +618,10 @@ function downloadJsonFile(filename, obj) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function downloadJsonFile(filename, obj) {
+  downloadTextFile(filename, JSON.stringify(obj, null, 2), "application/json");
 }
 
 // ─── useLocalStorage ─────────────────────────────────────────
@@ -6736,7 +6740,7 @@ function ChatSummaryRow() {
 // Per-day LLM spend for the current project, fetched from the cost state
 // file on open. Days appear once tracking has recorded them; spend accrued
 // before daily tracking shows as a single "earlier" remainder row.
-function CostListDialog({ open, onOpenChange, projectId, userId, t, lang }) {
+function CostListDialog({ open, onOpenChange, projectId, projectName, userId, t, lang }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -6783,6 +6787,42 @@ function CostListDialog({ open, onOpenChange, projectId, userId, t, lang }) {
         ))}
       </div>
     );
+  };
+
+  // Flatten the same day/model rows the dialog renders into a spreadsheet-friendly
+  // CSV, using raw numbers (no "$"/"k" formatting). The project name rides in the
+  // first line (the "header") and the filename.
+  const buildCsv = () => {
+    const tk = (tok) => [tok?.input || 0, tok?.output || 0, tok?.cacheRead || 0, tok?.cacheWrite || 0];
+    const row = (cells) => cells.map(csvField).join(",");
+    const lines = [
+      row(["Project", projectName || "project"]),
+      row(["Generated", new Date().toISOString()]),
+      "",
+      row(["Date", "Type", "Provider", "Model", "Input tokens", "Output tokens", "Cache read", "Cache write", "Total USD"]),
+    ];
+    for (const [day, bucket] of days) {
+      const models = Object.entries(bucket.byModel || {}).sort((a, b) => b[1].totalUsd - a[1].totalUsd);
+      const modelSum = models.reduce((sum, [, m]) => sum + (m.totalUsd || 0), 0);
+      const dayRemainder = bucket.totalUsd - modelSum;
+      lines.push(row([day, "day", "", "", ...tk(bucket.tokens), bucket.totalUsd || 0]));
+      for (const [modelId, m] of models) {
+        lines.push(row([day, "model", m.provider || "", modelId, ...tk(m.tokens), m.totalUsd || 0]));
+      }
+      if (models.length > 0 && dayRemainder > 0.005) {
+        lines.push(row([day, "unknown-model", "", "", "", "", "", "", dayRemainder]));
+      }
+    }
+    if (earlier > 0.005) {
+      lines.push(row(["", "earlier", "", "", "", "", "", "", earlier]));
+    }
+    lines.push(row(["", "total", "", "", ...tk(data.tokens), data.totalUsd || 0]));
+    return lines.join("\r\n");
+  };
+
+  const handleDownload = () => {
+    if (!hasAny) return;
+    downloadTextFile(`${csvSlug(projectName)}-costs-${yyyymmdd(new Date())}.csv`, buildCsv(), "text/csv;charset=utf-8");
   };
 
   return (
@@ -6848,6 +6888,9 @@ function CostListDialog({ open, onOpenChange, projectId, userId, t, lang }) {
             </div>
           )}
           <div className="modal-actions">
+            <button className="btn-secondary" onClick={handleDownload} disabled={!hasAny}>
+              <Download size={14} /> {t("projectCost.downloadCsv")}
+            </button>
             <Dialog.Close asChild>
               <button className="btn-secondary">{t("common.close") || "Close"}</button>
             </Dialog.Close>
@@ -7093,6 +7136,7 @@ function ChatSection() {
         open={showCostList}
         onOpenChange={setShowCostList}
         projectId={state.currentProjectId}
+        projectName={state.currentProjectName || currentProject?.name || "project"}
         userId={userId}
         t={t}
         lang={lang}
@@ -8605,6 +8649,28 @@ function formatProjectCost(usd) {
   if (usd < 0.01) return "<$0.01";
   if (usd >= 100) return `$${Math.round(usd)}`;
   return `$${usd.toFixed(2)}`;
+}
+
+// One CSV cell: quote-wrap and double any internal quotes when the value
+// contains a comma, quote or newline (RFC-4180 style). Empty/null → "".
+function csvField(v) {
+  const s = v == null ? "" : String(v);
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// Turn a project name into a filename-safe slug for exports: only keep
+// [A-Za-z0-9-_], collapse runs to one "-", trim edge "-", fall back to "project".
+function csvSlug(name) {
+  const slug = String(name || "").replace(/[^A-Za-z0-9-_]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "project";
+}
+
+// Local-date YYYYMMDD for export filenames.
+function yyyymmdd(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}${m}${day}`;
 }
 
 // Model search for the LLM settings: fetches the provider's model list via
