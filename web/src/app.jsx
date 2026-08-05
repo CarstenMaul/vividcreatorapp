@@ -762,11 +762,21 @@ function parsePersistedMessages(messages) {
   const parsed = [];
   const hiddenToolIds = new Set();
   const questionToolIds = new Set();
+  // An agent round is many LLM inferences — each tool-calling step is its own
+  // assistant message with its own cost, and textless steps aren't rendered.
+  // Roll those costs up into the next visible assistant message so the shown
+  // cost is the whole round's, and the per-message deltas sum to the total.
+  let roundCost = 0;
+  let roundModel = null;
   for (const msg of messages) {
     if (msg.role === "user") {
+      roundCost = 0;
+      roundModel = null;
       parsed.push({ type: "user", text: stripChatArtifacts(msg.displayText ?? msg.content), ts: msg.ts, author: msg.author });
     } else if (msg.role === "assistant") {
       const { text, thinking, toolCalls } = msg.content;
+      if (typeof msg.costUsd === "number" && Number.isFinite(msg.costUsd)) roundCost += msg.costUsd;
+      if (msg.model) roundModel = msg.model;
       if (thinking) parsed.push({ type: "thinking", text: thinking });
       if (toolCalls) {
         for (const tc of toolCalls) {
@@ -785,7 +795,10 @@ function parsePersistedMessages(messages) {
           }
         }
       }
-      if (text) parsed.push({ type: "assistant", text: stripChatArtifacts(text), streaming: false, ts: msg.ts, costUsd: msg.costUsd, model: msg.model });
+      if (text) {
+        parsed.push({ type: "assistant", text: stripChatArtifacts(text), streaming: false, ts: msg.ts, costUsd: roundCost, model: msg.model || roundModel });
+        roundCost = 0;
+      }
     } else if (msg.role === "compaction") {
       // Persisted marker for a context compaction — same block the live
       // compaction_end SSE event renders, so it survives reloads.
@@ -1210,6 +1223,7 @@ function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPrevie
   const thinkingTextRef = useRef("");
   const rafRef = useRef(null);
   const hasThinkingRef = useRef(false);
+  const runCostRef = useRef(0); // accumulates per-inference cost across one agent round
   const isCompactingRef = useRef(false);
   const isRetryingRef = useRef(false);
 
@@ -1334,7 +1348,18 @@ function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPrevie
       }
       let data = null;
       try { data = JSON.parse(e.data); } catch {}
-      dispatch({ type: "UPDATE_LAST_ASSISTANT", updates: { text: textRef.current, streaming: false, costUsd: data?.usage?.costUsd, model: data?.model } });
+      const stepCost = data?.usage?.costUsd;
+      if (typeof stepCost === "number" && Number.isFinite(stepCost)) runCostRef.current += stepCost;
+      // A textless step is a tool-calling inference — not rendered on its own,
+      // so keep its cost in the accumulator and attach the running round total
+      // to the next assistant message that actually shows text.
+      const stepHasText = !!textRef.current;
+      dispatch({ type: "UPDATE_LAST_ASSISTANT", updates: {
+        text: textRef.current,
+        streaming: false,
+        ...(stepHasText ? { costUsd: runCostRef.current, model: data?.model } : {}),
+      } });
+      if (stepHasText) runCostRef.current = 0;
       hasThinkingRef.current = false;
       stopLiveTokenStats();
       if (data?.usage && messageStartTimeRef.current) {
@@ -1393,6 +1418,7 @@ function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPrevie
       setTokenStats(null);
       messageStartTimeRef.current = null;
       outputCharsRef.current = 0;
+      runCostRef.current = 0;
       dispatch({ type: "SET_STREAMING", isStreaming: true });
     });
 
