@@ -18,14 +18,12 @@
     "bundle:runtime": "node scripts/bundle-runtime.mjs",
     "postinstall": "patch-package",
     "release:bump": "npm version patch -m \"Build v%s\"",
-    "dist:win": "npm run release:bump && patch-package && npm run electron:build && npm run bundle:runtime && electron-builder --win",
-    "dist:mac": "npm run release:bump && npm run electron:build && npm run bundle:runtime && electron-builder --mac",
-    "dist:linux": "npm run release:bump && npm run electron:build && electron-builder --linux",
-    "dist:win:nobump": "patch-package && npm run electron:build && npm run bundle:runtime && electron-builder --win",
-    "dist:mac:nobump": "npm run electron:build && npm run bundle:runtime && electron-builder --mac",
-    "dist:linux:nobump": "npm run electron:build && electron-builder --linux",
+    "sync:version": "node scripts/sync-version.mjs",
+    "dist:win": "npm run sync:version && patch-package && npm run electron:build && npm run bundle:runtime && electron-builder --win",
+    "dist:mac": "npm run sync:version && npm run electron:build && npm run bundle:runtime && electron-builder --mac",
+    "dist:linux": "npm run sync:version && npm run electron:build && electron-builder --linux",
     "notarize:mac": "node scripts/notarize-mac.mjs",
-    "dist:mac:signed": "npm run dist:mac:nobump && npm run notarize:mac"
+    "dist:mac:signed": "npm run dist:mac && npm run notarize:mac"
   },
   "dependencies": {
     "@azure/core-auth": "^1.10.1",
