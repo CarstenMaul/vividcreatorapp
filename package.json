@@ -33,7 +33,7 @@
     "@earendil-works/pi-coding-agent": "0.83.0",
     "archiver": "^7.0.1",
     "axios": "^1.18.1",
-    "bcrypt": "^5.1.1",
+    "bcrypt": "^6.0.0",
     "express": "^5.2.1",
     "multer": "^2.1.1",
     "patch-package": "^8.0.1",
@@ -74,5 +74,8 @@
   },
   "allowScripts": {
     "electron@42.5.0": true
+  },
+  "overrides": {
+    "tar": "^7.5.22"
   }
 }
