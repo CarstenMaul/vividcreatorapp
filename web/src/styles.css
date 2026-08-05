@@ -1093,6 +1093,12 @@ html, body {
   line-height: 1.2;
 }
 .message-meta-name { font-weight: 600; }
+/* Model + delta-cost shown on an agent message's meta line. A separator dot
+   before each keeps them distinct from the datetime. */
+.message-meta-model::before,
+.message-meta-cost::before { content: "·"; margin-right: 6px; }
+.message-meta-model,
+.message-meta-cost { font-variant-numeric: tabular-nums; }
 
 .message-copy-btn {
   background: none;

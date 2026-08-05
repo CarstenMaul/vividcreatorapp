@@ -785,7 +785,7 @@ function parsePersistedMessages(messages) {
           }
         }
       }
-      if (text) parsed.push({ type: "assistant", text: stripChatArtifacts(text), streaming: false, ts: msg.ts });
+      if (text) parsed.push({ type: "assistant", text: stripChatArtifacts(text), streaming: false, ts: msg.ts, costUsd: msg.costUsd, model: msg.model });
     } else if (msg.role === "compaction") {
       // Persisted marker for a context compaction — same block the live
       // compaction_end SSE event renders, so it survives reloads.
@@ -1332,24 +1332,23 @@ function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPrevie
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
       }
-      dispatch({ type: "UPDATE_LAST_ASSISTANT", updates: { text: textRef.current, streaming: false } });
+      let data = null;
+      try { data = JSON.parse(e.data); } catch {}
+      dispatch({ type: "UPDATE_LAST_ASSISTANT", updates: { text: textRef.current, streaming: false, costUsd: data?.usage?.costUsd, model: data?.model } });
       hasThinkingRef.current = false;
       stopLiveTokenStats();
-      try {
-        const data = JSON.parse(e.data);
-        if (data.usage && messageStartTimeRef.current) {
-          const durationMs = (data.endTime || Date.now()) - messageStartTimeRef.current;
-          const durationSec = Math.max(durationMs / 1000, 0.1);
-          setTokenStats({
-            inputTokens: data.usage.input,
-            outputTokens: data.usage.output,
-            durationMs,
-            inputPerSec: Math.round(data.usage.input / durationSec),
-            outputPerSec: Math.round(data.usage.output / durationSec),
-            live: false,
-          });
-        }
-      } catch {}
+      if (data?.usage && messageStartTimeRef.current) {
+        const durationMs = (data.endTime || Date.now()) - messageStartTimeRef.current;
+        const durationSec = Math.max(durationMs / 1000, 0.1);
+        setTokenStats({
+          inputTokens: data.usage.input,
+          outputTokens: data.usage.output,
+          durationMs,
+          inputPerSec: Math.round(data.usage.input / durationSec),
+          outputPerSec: Math.round(data.usage.output / durationSec),
+          live: false,
+        });
+      }
     });
 
     es.addEventListener("tool_start", (e) => {
@@ -2587,12 +2586,15 @@ function CopyMessageButton({ text }) {
 
 // Muted meta row shown above a message: optional author name, the formatted
 // datetime, and the copy button. Renders nothing if there's no content at all.
-function MessageMeta({ name, ts, text }) {
+function MessageMeta({ name, ts, text, model, cost }) {
   const when = formatMessageDateTime(ts);
+  const costLabel = typeof cost === "number" && Number.isFinite(cost) ? formatProjectCost(cost) : null;
   return (
     <div className="message-meta">
       {name && <span className="message-meta-name">{name}</span>}
       {when && <span className="message-meta-time">{when}</span>}
+      {model && <span className="message-meta-model">{model}</span>}
+      {costLabel && <span className="message-meta-cost">{costLabel}</span>}
       <CopyMessageButton text={text} />
     </div>
   );
@@ -2830,7 +2832,7 @@ function MermaidModal({ src, onClose }) {
   );
 }
 
-function AssistantMessage({ text, streaming, isError, iconAsTrigger, triggerOpen, ts, withMeta }) {
+function AssistantMessage({ text, streaming, isError, iconAsTrigger, triggerOpen, ts, model, costUsd, withMeta }) {
   const { t } = useContext(AppContext);
   const [modalSrc, setModalSrc] = useState(null);
   const cleaned = useMemo(() => stripChatArtifacts(text) || "", [text]);
@@ -2872,7 +2874,7 @@ function AssistantMessage({ text, streaming, isError, iconAsTrigger, triggerOpen
     <div className="message-assistant-wrapper">
       {iconNode}
       <div className={classes}>
-        {showMeta && <MessageMeta ts={ts} text={cleaned} />}
+        {showMeta && <MessageMeta ts={ts} text={cleaned} model={model} cost={costUsd} />}
         {isError
           // Error text is a raw runtime string (often a Windows file path).
           // Rendering it as Markdown would swallow backslashes before escapable
@@ -3321,7 +3323,7 @@ function MessageList({ height }) {
               const key = item.idx;
               switch (msg.type) {
                 case "user": return <UserMessage key={key} text={msg.text} image={msg.image} attachments={msg.attachments} userName={msg.author || "User"} ts={msg.ts} />;
-                case "assistant": return <AssistantMessage key={key} text={msg.text} streaming={msg.streaming} isError={msg.isError} ts={msg.ts} withMeta />;
+                case "assistant": return <AssistantMessage key={key} text={msg.text} streaming={msg.streaming} isError={msg.isError} ts={msg.ts} model={msg.model} costUsd={msg.costUsd} withMeta />;
                 case "compaction": return <CompactionBlock key={key} error={msg.error} />;
                 case "question": return <MultipleChoiceQuestion key={key} toolCallId={msg.toolCallId} question={msg.question} options={msg.options} answered={msg.answered} selectedAnswer={msg.selectedAnswer} />;
                 default: return null;
@@ -6482,13 +6484,14 @@ function RowKebab({ items, ariaLabel, disabled }) {
   );
 }
 
-function ChatTabKebab({ onRename, onClear, onDelete, disabled, t }) {
+function ChatTabKebab({ onRename, onClear, onDelete, onDownload, canDownload, disabled, t }) {
   return (
     <RowKebab
       ariaLabel={t("chat.tab.menu")}
       disabled={disabled}
       items={[
         { icon: <Pencil size={12} />, label: t("chat.tab.rename"), onClick: onRename },
+        { icon: <Download size={12} />, label: t("chat.tab.download"), onClick: onDownload, disabled: !canDownload },
         { icon: <Trash2 size={12} />, label: t("chat.tab.clear"), onClick: onClear, disabled },
         { icon: <X size={12} />, label: t("chat.tab.delete"), onClick: onDelete, disabled, danger: true },
       ]}
@@ -6496,7 +6499,7 @@ function ChatTabKebab({ onRename, onClear, onDelete, disabled, t }) {
   );
 }
 
-function ChatTab({ chat, active, isStreaming, onSelect, onRename, onClear, onDelete, t }) {
+function ChatTab({ chat, active, isStreaming, onSelect, onRename, onClear, onDelete, onDownload, canDownload, t }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(chat.name);
   const inputRef = useRef(null);
@@ -6537,6 +6540,8 @@ function ChatTab({ chat, active, isStreaming, onSelect, onRename, onClear, onDel
             onRename={startRename}
             onClear={onClear}
             onDelete={onDelete}
+            onDownload={onDownload}
+            canDownload={canDownload}
             disabled={active && isStreaming}
             t={t}
           />
@@ -6547,7 +6552,7 @@ function ChatTab({ chat, active, isStreaming, onSelect, onRename, onClear, onDel
 }
 
 function ChatTabs() {
-  const { state, selectChat, createChat, renameChat, deleteChat, clearChat, t } = useContext(AppContext);
+  const { state, selectChat, createChat, renameChat, deleteChat, clearChat, downloadChatCsv, t } = useContext(AppContext);
   const stripRef = useRef(null);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
@@ -6617,6 +6622,8 @@ function ChatTabs() {
             onRename={renameChat}
             onClear={() => onClearRequest(chat)}
             onDelete={() => onDeleteRequest(chat)}
+            onDownload={() => downloadChatCsv(chat)}
+            canDownload={chat.id === state.currentChatId ? (state.messages?.length > 0) : true}
             t={t}
           />
         ))}
@@ -8671,6 +8678,37 @@ function yyyymmdd(d) {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}${m}${day}`;
+}
+
+// Flattens a chat's persisted messages into CSV — one row per event (user
+// message, assistant message, each assistant tool call, each tool result), so
+// the export carries every attribute (datetime, model, delta cost, tool calls).
+function buildChatCsv(messages, chatName) {
+  const row = (cells) => cells.map(csvField).join(",");
+  const lines = [
+    row(["Chat", chatName || "chat"]),
+    row(["Generated", new Date().toISOString()]),
+    "",
+    row(["Datetime", "Role", "User", "Model", "DeltaCostUSD", "Message", "ToolName", "ToolArgs", "ToolResult", "IsError"]),
+  ];
+  for (const msg of Array.isArray(messages) ? messages : []) {
+    const ts = msg.ts || "";
+    if (msg.role === "user") {
+      const text = typeof msg.content === "string" ? msg.content : "";
+      lines.push(row([ts, "user", msg.author || "User", "", "", msg.displayText || text, "", "", "", ""]));
+    } else if (msg.role === "assistant") {
+      const content = msg.content && typeof msg.content === "object" ? msg.content : {};
+      lines.push(row([ts, "assistant", "", msg.model || "", msg.costUsd ?? "", content.text || "", "", "", "", ""]));
+      for (const call of Array.isArray(content.toolCalls) ? content.toolCalls : []) {
+        lines.push(row([ts, "toolCall", "", "", "", "", call?.name || "", call?.args != null ? JSON.stringify(call.args) : "", "", ""]));
+      }
+    } else if (msg.role === "toolResult") {
+      const content = msg.content && typeof msg.content === "object" ? msg.content : {};
+      lines.push(row([ts, "toolResult", "", "", "", "", content.toolName || "", "", content.resultText || "", content.isError ? "true" : ""]));
+    }
+    // compaction markers carry no user-facing content — skip.
+  }
+  return lines.join("\r\n");
 }
 
 // Model search for the LLM settings: fetches the provider's model list via
@@ -17485,6 +17523,21 @@ export function App() {
     }
   }, [state.currentProjectId, state.currentChatId, userId]);
 
+  // Export a chat as CSV (one row per event) from the chat tab's 3-dot menu.
+  // Fetches the raw persisted rows so model / delta cost / tool calls are all
+  // present. No-ops silently on an empty chat.
+  const downloadChatCsv = useCallback(async (chat) => {
+    if (!state.currentProjectId || !chat?.id) return;
+    try {
+      const messages = await api(`/projects/${state.currentProjectId}/messages?userId=${encodeURIComponent(userId)}&chatId=${encodeURIComponent(chat.id)}`);
+      if (!Array.isArray(messages) || messages.length === 0) return;
+      const csv = buildChatCsv(messages, chat.name);
+      downloadTextFile(`${csvSlug(chat.name)}-chat-${yyyymmdd(new Date())}.csv`, csv, "text/csv;charset=utf-8");
+    } catch (err) {
+      console.error("[VCA] Failed to export chat CSV:", err);
+    }
+  }, [state.currentProjectId, userId]);
+
   // Auto-open Settings on first load when no LLM is configured. The dialog
   // itself enforces admin-only — non-admins get a no-op since they can't
   // configure anything anyway. Gate on `isAdmin` here too: serverConfig
@@ -17505,7 +17558,7 @@ export function App() {
     confirmTakeover, cancelTakeover, reclaimProject,
     takeOverFromOtherUser, cancelServerLockHeld, retakeServerLock, releaseServerLock,
     handleSend, handleAbort, handleCompact, clearChat, refreshPreview, reloadMessages, reloadDiagrams,
-    selectChat, createChat, renameChat, deleteChat,
+    selectChat, createChat, renameChat, deleteChat, downloadChatCsv,
     iframeRef, theme, toggleTheme, deployStatus, refreshDeployStatus,
     gitRemoteConfigured, refreshGitRemoteStatus,
     setShowSettings, setShowNewProject, setShowProjectsGallery, setShowCommits, setShowGit, setShowSkills, setShowDeploy,

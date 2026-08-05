@@ -1375,9 +1375,13 @@ type PersistedChatMessage = {
   ts?: string;
   author?: string;
   displayText?: string;
-  // USD cost of this assistant message (pi's usage.cost.total). Not shown in
-  // the UI yet — persisted for future per-chat cost breakdowns.
+  // USD cost of this assistant message (pi's usage.cost.total) — the per-message
+  // "delta" cost. Surfaced in the message meta row and the chat CSV export.
   costUsd?: number;
+  // Model id / provider that produced this assistant message. Shown in the meta
+  // row alongside the delta cost. Older messages predating this field lack it.
+  model?: string;
+  provider?: string;
 };
 
 interface ProjectMetadata {
@@ -2341,6 +2345,8 @@ function forwardAgentEvent(managed: ManagedSession, event: AgentSessionEvent): v
       sendSSEEvent(managed, "message_end", {
         endTime: Date.now(),
         usage: msg?.usage ? { input: msg.usage.input, output: msg.usage.output, costUsd: msg.usage.cost?.total } : null,
+        model: msg?.model,
+        provider: msg?.provider,
       });
       emitContextUsage(managed);
       // Lifetime spend accounting. Fire-and-forget so streaming never blocks.
@@ -5753,6 +5759,8 @@ function sessionBranchToPersistedMessages(
         content: { text: textParts.join(""), thinking: thinkingParts.join(""), toolCalls },
         ts,
         ...(typeof costUsd === "number" && Number.isFinite(costUsd) ? { costUsd } : {}),
+        ...(typeof msg.model === "string" && msg.model ? { model: msg.model } : {}),
+        ...(typeof msg.provider === "string" && msg.provider ? { provider: msg.provider } : {}),
       });
     } else if (msg.role === "toolResult") {
       const trContent: any = {
@@ -6108,6 +6116,9 @@ export async function getMessages(userId: string, projectId: string, chatId: str
   ts?: string;
   author?: string;
   displayText?: string;
+  costUsd?: number;
+  model?: string;
+  provider?: string;
 }>> {
   const key = makeSessionKey(userId, projectId, chatId);
   const managed = sessions.get(key);
