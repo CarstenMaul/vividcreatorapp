@@ -1349,6 +1349,9 @@ export interface ManagedSession {
   // userIdx (same mechanism as userDisplayTexts). Lets shared-project chats show
   // the actual submitter — not the current viewer — on every message.
   userAuthors: string[];
+  // Reasoning effort (thinking level) this session was created with. Attached
+  // to each assistant message so the chat can show model:reasoning.
+  thinkingLevel?: string;
   // An LLM error from the current turn that hasn't been shown to the chat yet.
   // Buffered because a transient error may be auto-retried — it is only
   // surfaced to the chat if it turns out to be final (retries exhausted, or the
@@ -1382,6 +1385,10 @@ type PersistedChatMessage = {
   // row alongside the delta cost. Older messages predating this field lack it.
   model?: string;
   provider?: string;
+  // Reasoning effort (thinking level) the session ran with, e.g. "medium" /
+  // "high". Shown as model:reasoning in the meta row. Absent on older messages
+  // and on SDK-healed history.
+  reasoning?: string;
 };
 
 interface ProjectMetadata {
@@ -2347,6 +2354,7 @@ function forwardAgentEvent(managed: ManagedSession, event: AgentSessionEvent): v
         usage: msg?.usage ? { input: msg.usage.input, output: msg.usage.output, costUsd: msg.usage.cost?.total } : null,
         model: msg?.model,
         provider: msg?.provider,
+        reasoning: managed.thinkingLevel,
       });
       emitContextUsage(managed);
       // Lifetime spend accounting. Fire-and-forget so streaming never blocks.
@@ -4935,6 +4943,7 @@ async function createSessionLocked(userId: string, projectId: string, chatId: st
     pendingScreenshots: new Map(),
     userDisplayTexts: [],
     userAuthors: [],
+    thinkingLevel,
   };
   managedRef = managed;
   await hydrateManagedSessionDisplayMetadata(managed);
@@ -5716,7 +5725,7 @@ type SessionBranchEntry = ReturnType<SessionManager["getBranch"]>[number];
 function sessionBranchToPersistedMessages(
   branch: SessionBranchEntry[],
   unpersistedTail: any[],
-  meta: { userDisplayTexts: string[]; userAuthors: string[] },
+  meta: { userDisplayTexts: string[]; userAuthors: string[]; thinkingLevel?: string },
 ): PersistedChatMessage[] {
   const result: PersistedChatMessage[] = [];
   let userIdx = 0;
@@ -5761,6 +5770,7 @@ function sessionBranchToPersistedMessages(
         ...(typeof costUsd === "number" && Number.isFinite(costUsd) ? { costUsd } : {}),
         ...(typeof msg.model === "string" && msg.model ? { model: msg.model } : {}),
         ...(typeof msg.provider === "string" && msg.provider ? { provider: msg.provider } : {}),
+        ...(meta.thinkingLevel ? { reasoning: meta.thinkingLevel } : {}),
       });
     } else if (msg.role === "toolResult") {
       const trContent: any = {
@@ -6119,6 +6129,7 @@ export async function getMessages(userId: string, projectId: string, chatId: str
   costUsd?: number;
   model?: string;
   provider?: string;
+  reasoning?: string;
 }>> {
   const key = makeSessionKey(userId, projectId, chatId);
   const managed = sessions.get(key);

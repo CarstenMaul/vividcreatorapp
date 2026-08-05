@@ -768,15 +768,18 @@ function parsePersistedMessages(messages) {
   // cost is the whole round's, and the per-message deltas sum to the total.
   let roundCost = 0;
   let roundModel = null;
+  let roundReasoning = null;
   for (const msg of messages) {
     if (msg.role === "user") {
       roundCost = 0;
       roundModel = null;
+      roundReasoning = null;
       parsed.push({ type: "user", text: stripChatArtifacts(msg.displayText ?? msg.content), ts: msg.ts, author: msg.author });
     } else if (msg.role === "assistant") {
       const { text, thinking, toolCalls } = msg.content;
       if (typeof msg.costUsd === "number" && Number.isFinite(msg.costUsd)) roundCost += msg.costUsd;
       if (msg.model) roundModel = msg.model;
+      if (msg.reasoning) roundReasoning = msg.reasoning;
       if (thinking) parsed.push({ type: "thinking", text: thinking });
       if (toolCalls) {
         for (const tc of toolCalls) {
@@ -796,7 +799,7 @@ function parsePersistedMessages(messages) {
         }
       }
       if (text) {
-        parsed.push({ type: "assistant", text: stripChatArtifacts(text), streaming: false, ts: msg.ts, costUsd: roundCost, model: msg.model || roundModel });
+        parsed.push({ type: "assistant", text: stripChatArtifacts(text), streaming: false, ts: msg.ts, costUsd: roundCost, model: msg.model || roundModel, reasoning: msg.reasoning || roundReasoning });
         roundCost = 0;
       }
     } else if (msg.role === "compaction") {
@@ -1357,7 +1360,7 @@ function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPrevie
       dispatch({ type: "UPDATE_LAST_ASSISTANT", updates: {
         text: textRef.current,
         streaming: false,
-        ...(stepHasText ? { costUsd: runCostRef.current, model: data?.model } : {}),
+        ...(stepHasText ? { costUsd: runCostRef.current, model: data?.model, reasoning: data?.reasoning } : {}),
       } });
       if (stepHasText) runCostRef.current = 0;
       hasThinkingRef.current = false;
@@ -2612,14 +2615,15 @@ function CopyMessageButton({ text }) {
 
 // Muted meta row shown above a message: optional author name, the formatted
 // datetime, and the copy button. Renders nothing if there's no content at all.
-function MessageMeta({ name, ts, text, model, cost }) {
+function MessageMeta({ name, ts, text, model, reasoning, cost }) {
   const when = formatMessageDateTime(ts);
+  const modelLabel = model ? (reasoning ? `${model}:${reasoning}` : model) : null;
   const costLabel = typeof cost === "number" && Number.isFinite(cost) ? formatProjectCost(cost) : null;
   return (
     <div className="message-meta">
       {name && <span className="message-meta-name">{name}</span>}
       {when && <span className="message-meta-time">{when}</span>}
-      {model && <span className="message-meta-model">{model}</span>}
+      {modelLabel && <span className="message-meta-model">{modelLabel}</span>}
       {costLabel && <span className="message-meta-cost">{costLabel}</span>}
       <CopyMessageButton text={text} />
     </div>
@@ -2858,7 +2862,7 @@ function MermaidModal({ src, onClose }) {
   );
 }
 
-function AssistantMessage({ text, streaming, isError, iconAsTrigger, triggerOpen, ts, model, costUsd, withMeta }) {
+function AssistantMessage({ text, streaming, isError, iconAsTrigger, triggerOpen, ts, model, reasoning, costUsd, withMeta }) {
   const { t } = useContext(AppContext);
   const [modalSrc, setModalSrc] = useState(null);
   const cleaned = useMemo(() => stripChatArtifacts(text) || "", [text]);
@@ -2900,7 +2904,7 @@ function AssistantMessage({ text, streaming, isError, iconAsTrigger, triggerOpen
     <div className="message-assistant-wrapper">
       {iconNode}
       <div className={classes}>
-        {showMeta && <MessageMeta ts={ts} text={cleaned} model={model} cost={costUsd} />}
+        {showMeta && <MessageMeta ts={ts} text={cleaned} model={model} reasoning={reasoning} cost={costUsd} />}
         {isError
           // Error text is a raw runtime string (often a Windows file path).
           // Rendering it as Markdown would swallow backslashes before escapable
@@ -3349,7 +3353,7 @@ function MessageList({ height }) {
               const key = item.idx;
               switch (msg.type) {
                 case "user": return <UserMessage key={key} text={msg.text} image={msg.image} attachments={msg.attachments} userName={msg.author || "User"} ts={msg.ts} />;
-                case "assistant": return <AssistantMessage key={key} text={msg.text} streaming={msg.streaming} isError={msg.isError} ts={msg.ts} model={msg.model} costUsd={msg.costUsd} withMeta />;
+                case "assistant": return <AssistantMessage key={key} text={msg.text} streaming={msg.streaming} isError={msg.isError} ts={msg.ts} model={msg.model} reasoning={msg.reasoning} costUsd={msg.costUsd} withMeta />;
                 case "compaction": return <CompactionBlock key={key} error={msg.error} />;
                 case "question": return <MultipleChoiceQuestion key={key} toolCallId={msg.toolCallId} question={msg.question} options={msg.options} answered={msg.answered} selectedAnswer={msg.selectedAnswer} />;
                 default: return null;
@@ -8715,22 +8719,22 @@ function buildChatCsv(messages, chatName) {
     row(["Chat", chatName || "chat"]),
     row(["Generated", new Date().toISOString()]),
     "",
-    row(["Datetime", "Role", "User", "Model", "DeltaCostUSD", "Message", "ToolName", "ToolArgs", "ToolResult", "IsError"]),
+    row(["Datetime", "Role", "User", "Model", "Reasoning", "DeltaCostUSD", "Message", "ToolName", "ToolArgs", "ToolResult", "IsError"]),
   ];
   for (const msg of Array.isArray(messages) ? messages : []) {
     const ts = msg.ts || "";
     if (msg.role === "user") {
       const text = typeof msg.content === "string" ? msg.content : "";
-      lines.push(row([ts, "user", msg.author || "User", "", "", msg.displayText || text, "", "", "", ""]));
+      lines.push(row([ts, "user", msg.author || "User", "", "", "", msg.displayText || text, "", "", "", ""]));
     } else if (msg.role === "assistant") {
       const content = msg.content && typeof msg.content === "object" ? msg.content : {};
-      lines.push(row([ts, "assistant", "", msg.model || "", msg.costUsd ?? "", content.text || "", "", "", "", ""]));
+      lines.push(row([ts, "assistant", "", msg.model || "", msg.reasoning || "", msg.costUsd ?? "", content.text || "", "", "", "", ""]));
       for (const call of Array.isArray(content.toolCalls) ? content.toolCalls : []) {
-        lines.push(row([ts, "toolCall", "", "", "", "", call?.name || "", call?.args != null ? JSON.stringify(call.args) : "", "", ""]));
+        lines.push(row([ts, "toolCall", "", "", "", "", "", call?.name || "", call?.args != null ? JSON.stringify(call.args) : "", "", ""]));
       }
     } else if (msg.role === "toolResult") {
       const content = msg.content && typeof msg.content === "object" ? msg.content : {};
-      lines.push(row([ts, "toolResult", "", "", "", "", content.toolName || "", "", content.resultText || "", content.isError ? "true" : ""]));
+      lines.push(row([ts, "toolResult", "", "", "", "", "", content.toolName || "", "", content.resultText || "", content.isError ? "true" : ""]));
     }
     // compaction markers carry no user-facing content — skip.
   }
