@@ -21,6 +21,7 @@ import { stringify as yamlStringify } from "yaml";
 import { getSystemPrompt, getSystemPromptVersion } from "./system-prompt.js";
 import { createRequirementTools } from "./requirement-tools.js";
 import { createSkillTools } from "./skill-tools.js";
+import { createLlmConfigTools } from "./llm-config-tools.js";
 import { createWebFetchTool } from "./webfetch-tool.js";
 import { createWebSearchTool } from "./websearch-tool.js";
 import { createScreenshotTool, type ScreenshotClientResult } from "./screenshot-tool.js";
@@ -1352,6 +1353,11 @@ export interface ManagedSession {
   // Reasoning effort (thinking level) this session was created with. Attached
   // to each assistant message so the chat can show model:reasoning.
   thinkingLevel?: string;
+  // Set when the agent switches THIS chat's LLM profile mid-run via
+  // set_llm_config (session-local — the deployment's active profile pointer is
+  // untouched). Lets the sidebar profile switcher highlight the profile this
+  // chat is actually running. Undefined ⇒ still on the deployment's active profile.
+  activeProfileId?: string;
   // An LLM error from the current turn that hasn't been shown to the chat yet.
   // Buffered because a transient error may be auto-retried — it is only
   // surfaced to the chat if it turns out to be final (retries exhausted, or the
@@ -4476,7 +4482,16 @@ function tokenOverride(n: unknown): number | undefined {
   return typeof n === "number" && Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
 }
 
-async function resolveLlmModel(apiKey?: string, llmConfig?: UserLLMConfig): Promise<{ model: any; runtime: ModelRuntime; thinkingLevel: any }> {
+// Build the model object + the per-provider credential material WITHOUT creating
+// a ModelRuntime. Split out from resolveLlmModel so callers that already own a
+// runtime (e.g. the set_llm_config tool switching a live session's model) can
+// reuse the exact same model-building + credential logic and register the keys
+// on their existing runtime instead of spinning up a throwaway one.
+//   - runtimeApiKeys: [provider, key] pairs to register via runtime.setRuntimeApiKey().
+//   - credentials: an OAuth-backed CredentialStore (codex/kimi/openrouter-OAuth).
+//     When set, the provider's auth lives in a shared store that can't be injected
+//     into an already-created runtime — a live in-session switch isn't possible.
+export async function resolveLlmModelParts(apiKey?: string, llmConfig?: UserLLMConfig): Promise<{ model: any; thinkingLevel: any; runtimeApiKeys: Array<[provider: string, key: string]>; credentials: CredentialStore | undefined }> {
   const config = getLLMConfig();
   // vca-settings.json is the deployment-wide source of truth. We always
   // merge it in: any field the request (llmConfig / apiKey) leaves blank
@@ -4713,6 +4728,12 @@ async function resolveLlmModel(apiKey?: string, llmConfig?: UserLLMConfig): Prom
     };
   }
 
+  return { model, thinkingLevel, runtimeApiKeys, credentials };
+}
+
+async function resolveLlmModel(apiKey?: string, llmConfig?: UserLLMConfig): Promise<{ model: any; runtime: ModelRuntime; thinkingLevel: any; runtimeApiKeys: Array<[provider: string, key: string]>; credentials: CredentialStore | undefined }> {
+  const { model, thinkingLevel, runtimeApiKeys, credentials } = await resolveLlmModelParts(apiKey, llmConfig);
+
   // Hermetic per-resolution runtime: modelsPath null / network off means no
   // ~/.pi config files are read and no catalog endpoints are fetched — VCA
   // hand-builds its models above. Request auth resolves from the runtime API
@@ -4726,7 +4747,7 @@ async function resolveLlmModel(apiKey?: string, llmConfig?: UserLLMConfig): Prom
     await runtime.setRuntimeApiKey(provider, key);
   }
 
-  return { model, runtime, thinkingLevel };
+  return { model, runtime, thinkingLevel, runtimeApiKeys, credentials };
 }
 
 // Case-insensitive on Windows; pi's context-file walk builds candidate paths
@@ -4890,6 +4911,9 @@ async function createSessionLocked(userId: string, projectId: string, chatId: st
   const customTools: ToolDefinition[] = [...hardenedTools, askQuestionTool, renameChatTool, serverLogTool, restartAppProcessTool, createWaitTool(), startNewChatTool];
   customTools.push(...createRequirementTools(() => managedRef!));
   customTools.push(...createSkillTools(() => managedRef!));
+  // Let the agent switch its own LLM profile / reasoning effort mid-run (this
+  // chat's session only) without stopping — see llm-config-tools.ts.
+  customTools.push(...createLlmConfigTools(() => managedRef!));
   // Web tools follow the configured LLM provider (see web-tools-config.ts).
   // web_fetch's direct path extracts with this session's own model, so hand it
   // the resolved model plus a key getter. Resolved per fetch (not captured):
@@ -5255,12 +5279,27 @@ export async function submitPromptAndAwaitCompletion(
   }
 }
 
-export function getSessionStatus(userId: string, projectId: string, chatId: string): { isStreaming: boolean; projectActiveChatId: string | null } {
+export function getSessionStatus(userId: string, projectId: string, chatId: string): {
+  isStreaming: boolean;
+  projectActiveChatId: string | null;
+  // Effective LLM config of THIS chat's live session (may differ from the
+  // deployment defaults after the agent ran set_llm_config). null when there is
+  // no live session yet — the client then falls back to the global defaults.
+  thinkingLevel: string | null;
+  activeProfileId: string | null;
+  provider: string | null;
+  modelId: string | null;
+} {
   const key = makeSessionKey(userId, projectId, chatId);
   const managed = sessions.get(key);
+  const model = managed?.session.model as any;
   return {
     isStreaming: managed?.session.isStreaming ?? false,
     projectActiveChatId: getProjectActiveChatId(userId, projectId),
+    thinkingLevel: managed?.thinkingLevel ?? managed?.session.thinkingLevel ?? null,
+    activeProfileId: managed?.activeProfileId ?? null,
+    provider: model?.provider ?? null,
+    modelId: model?.id ?? null,
   };
 }
 

@@ -1217,7 +1217,7 @@ function useProjectLock(tabId, dispatch) {
 }
 
 // ─── useSSE hook ─────────────────────────────────────────────
-function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPreview, setUseCaseMermaid, setUseCasePulse, setDeploymentMermaid, setDeploymentPulse, setComponentMermaid, setComponentPulse, setActivityPulse, setERPulse, setContextUsage, setTokenStats, setServerLogLines, setServerLogPulse, setProjectSteps, setProjectLogs, applyPreviewState, setProjectCost, agentScreenshotRef) {
+function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPreview, setUseCaseMermaid, setUseCasePulse, setDeploymentMermaid, setDeploymentPulse, setComponentMermaid, setComponentPulse, setActivityPulse, setERPulse, setContextUsage, setTokenStats, setServerLogLines, setServerLogPulse, setProjectSteps, setProjectLogs, applyPreviewState, setProjectCost, agentScreenshotRef, setSessionConfig) {
   const eventSourceRef = useRef(null);
   const messageStartTimeRef = useRef(null);
   const outputCharsRef = useRef(0);
@@ -1267,11 +1267,29 @@ function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPrevie
 
     es.addEventListener("open", () => {
       api(`/projects/${projectId}/status?userId=${encodeURIComponent(userId)}&chatId=${encodeURIComponent(chatId)}`)
-        .then(({ isStreaming, projectActiveChatId }) => {
+        .then(({ isStreaming, projectActiveChatId, thinkingLevel, activeProfileId, provider, modelId }) => {
           dispatch({ type: "SET_STREAMING", isStreaming });
           dispatch({ type: "SET_PROJECT_ACTIVE_CHAT", chatId: projectActiveChatId ?? null });
+          // Sync the sidebar controls to this chat's live session config (which
+          // the agent may have changed via set_llm_config). null fields fall
+          // back to the global defaults in the dropdowns.
+          setSessionConfig({
+            thinkingLevel: thinkingLevel ?? null,
+            activeProfileId: activeProfileId ?? null,
+            provider: provider ?? null,
+            modelId: modelId ?? null,
+          });
         })
         .catch(() => {});
+    });
+
+    // The agent switched this chat's LLM profile and/or reasoning effort mid-run
+    // (set_llm_config). Update the sidebar controls live so they reflect the
+    // config the session is actually running now.
+    es.addEventListener("llm_config_changed", (e) => {
+      let data;
+      try { data = JSON.parse(e.data); } catch { return; }
+      setSessionConfig((prev) => ({ ...(prev || {}), ...data }));
     });
 
     // Sent only to a client that connects while a turn is mid-stream (page
@@ -7286,14 +7304,21 @@ const THINKING_LEVELS = [
 ];
 
 function ThinkingEffortDropdown({ openUpward = false }) {
-  const { state, thinkingLevel, setThinkingLevel, userId, serverConfig, t } = useContext(AppContext);
+  const { state, thinkingLevel, setThinkingLevel, sessionConfig, setSessionConfig, userId, serverConfig, t } = useContext(AppContext);
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
-  const current = THINKING_LEVELS.find(l => l.value === thinkingLevel) || THINKING_LEVELS[3];
-  // Active provider/model for the dropdown header. serverConfig.llm is the
-  // authoritative resolved config (Azure env vars or admin Settings).
-  const activeProvider = serverConfig?.llm?.provider || "";
-  const activeModelId = serverConfig?.llm?.modelId || "";
+  // Show what THIS chat's session is actually running: the agent may have
+  // raised the effort mid-run via set_llm_config. Falls back to the global pref.
+  const effectiveLevel = sessionConfig?.thinkingLevel || thinkingLevel;
+  const current = THINKING_LEVELS.find(l => l.value === effectiveLevel) || THINKING_LEVELS[3];
+  // Active provider/model for the dropdown header. After the agent switched
+  // this chat's profile, show the session's live model; otherwise serverConfig.llm,
+  // the authoritative deployment config (Azure env vars or admin Settings).
+  // Gated on a real profile switch so an unchanged chat keeps the deployment
+  // label (session.model.provider is pi's internal id, not the VCA provider).
+  const switched = !!sessionConfig?.activeProfileId;
+  const activeProvider = (switched && sessionConfig?.provider) || serverConfig?.llm?.provider || "";
+  const activeModelId = (switched && sessionConfig?.modelId) || serverConfig?.llm?.modelId || "";
   const TriggerIcon = current.Icon;
   // Changing the level calls reset-sessions, which would kill the in-flight
   // agent run. Lock the picker while any chat in the project is processing —
@@ -7311,8 +7336,13 @@ function ThinkingEffortDropdown({ openUpward = false }) {
 
   const choose = (value) => {
     setOpen(false);
-    if (value === thinkingLevel) return;
-    setThinkingLevel(value);
+    // No-op if the session already runs this level (whether from the global
+    // pref or an agent switch) — avoids a needless global change + rebuild.
+    if (value === effectiveLevel) return;
+    setThinkingLevel(value);       // new global default
+    // reset-sessions rebuilds this chat's session from the new global, so any
+    // per-chat override the agent set no longer holds — drop the overlay.
+    setSessionConfig(null);
     if (userId) {
       api(`/users/${userId}/reset-sessions`, { method: "POST", body: JSON.stringify({}) }).catch(() => {});
     }
@@ -7346,7 +7376,7 @@ function ThinkingEffortDropdown({ openUpward = false }) {
             return (
               <button
                 key={l.value}
-                className={`thinking-dropdown-item${l.value === thinkingLevel ? " active" : ""}`}
+                className={`thinking-dropdown-item${l.value === effectiveLevel ? " active" : ""}`}
                 onClick={() => choose(l.value)}
                 disabled={l.disabled}
               >
@@ -7375,7 +7405,7 @@ function notifyLlmProfilesChanged() {
 // model is live. Admin-only and hidden when the LLM is env-configured; switching
 // is blocked while the agent is processing (mirrors the effort control).
 function ProfileSwitcherDropdown() {
-  const { state, userId, isAdmin, serverManaged, serverConfig, reloadServerConfig, selectProject, closeProject, t } = useContext(AppContext);
+  const { state, userId, isAdmin, serverManaged, serverConfig, sessionConfig, setSessionConfig, reloadServerConfig, selectProject, closeProject, t } = useContext(AppContext);
   const [open, setOpen] = useState(false);
   const [profiles, setProfiles] = useState([]);
   const [activeProfileId, setActiveProfileId] = useState("");
@@ -7422,13 +7452,18 @@ function ProfileSwitcherDropdown() {
   useEffect(() => { if (locked) setOpen(false); }, [locked]);
 
   const switchProfile = async (id) => {
-    if (locked || busy || id === activeProfileId) { setOpen(false); return; }
+    // No-op if this chat already runs the profile (global pointer or an agent
+    // override) — clicking the active item shouldn't trigger a global rebuild.
+    if (locked || busy || id === (sessionConfig?.activeProfileId || activeProfileId)) { setOpen(false); return; }
     setBusy(true);
     setError(null);
     try {
       // 1. Apply globally (rewrites vca-settings.json, records activeProfileId).
       await api(`/admin/llm-profiles/${id}/apply`, { method: "POST", body: JSON.stringify({}) });
       setActiveProfileId(id);
+      // The project is rebuilt from the new global config below, so any per-chat
+      // override the agent set no longer holds — drop the overlay.
+      setSessionConfig(null);
       // 2. Capture the open project BEFORE closing (closeProject nulls these).
       const pid = state.currentProjectId;
       const pname = state.currentProjectName;
@@ -7449,9 +7484,16 @@ function ProfileSwitcherDropdown() {
 
   if (!enabled || profiles.length === 0) return null;
 
-  const activeName = profiles.find((p) => p.id === activeProfileId)?.name || "";
-  const activeProvider = serverConfig?.llm?.provider || "";
-  const activeModelId = serverConfig?.llm?.modelId || "";
+  // Highlight the profile THIS chat is actually running: the agent may have
+  // switched it mid-run via set_llm_config. Falls back to the deployment's
+  // active profile when there is no per-chat override.
+  const effectiveProfileId = sessionConfig?.activeProfileId || activeProfileId;
+  const activeName = profiles.find((p) => p.id === effectiveProfileId)?.name || "";
+  // Show the live session model only after a per-chat switch; else the
+  // deployment default (session.model.provider is pi's internal id).
+  const switched = !!sessionConfig?.activeProfileId;
+  const activeProvider = (switched && sessionConfig?.provider) || serverConfig?.llm?.provider || "";
+  const activeModelId = (switched && sessionConfig?.modelId) || serverConfig?.llm?.modelId || "";
 
   return (
     <div ref={ref} className="profile-switcher-wrap">
@@ -7475,7 +7517,7 @@ function ProfileSwitcherDropdown() {
           {profiles.map((p) => (
             <button
               key={p.id}
-              className={`thinking-dropdown-item${p.id === activeProfileId ? " active" : ""}`}
+              className={`thinking-dropdown-item${p.id === effectiveProfileId ? " active" : ""}`}
               onClick={() => switchProfile(p.id)}
               disabled={busy}
             >
@@ -16545,6 +16587,15 @@ export function App() {
   const [llmApiVersion, setLlmApiVersion] = useState("");
   const [thinkingLevel, setThinkingLevel] = useState("medium");
 
+  // Effective LLM config of the currently-viewed chat's live session, as the
+  // agent may have changed it mid-run via set_llm_config. Distinct from the
+  // GLOBAL thinkingLevel pref / active-profile pointer so a per-chat switch is
+  // shown in the sidebar controls WITHOUT clobbering the persisted defaults.
+  // null (or null fields) ⇒ the controls fall back to the global values. Set on
+  // chat open / SSE reconnect and on the llm_config_changed event; cleared when
+  // switching chats or on a manual global change.
+  const [sessionConfig, setSessionConfig] = useState(null);
+
   // Image generation: provider/model/key, shaped like the LLM config.
   const [imageProvider, setImageProvider] = useState("google");
   const [imageModelId, setImageModelId] = useState("gemini-3.1-flash-image-preview");
@@ -16948,7 +16999,7 @@ export function App() {
   const [projectLogs, setProjectLogs] = useState({});
 
   // SSE
-  useSSE(state.currentProjectId, state.currentChatId, userId, sessionEpoch, dispatch, refreshPreview, setUseCaseMermaid, setUseCasePulse, setDeploymentMermaid, setDeploymentPulse, setComponentMermaid, setComponentPulse, setActivityPulse, setERPulse, setContextUsage, setTokenStats, setServerLogLines, setServerLogPulse, setProjectSteps, setProjectLogs, applyPreviewState, setProjectCost, agentScreenshotRef);
+  useSSE(state.currentProjectId, state.currentChatId, userId, sessionEpoch, dispatch, refreshPreview, setUseCaseMermaid, setUseCasePulse, setDeploymentMermaid, setDeploymentPulse, setComponentMermaid, setComponentPulse, setActivityPulse, setERPulse, setContextUsage, setTokenStats, setServerLogLines, setServerLogPulse, setProjectSteps, setProjectLogs, applyPreviewState, setProjectCost, agentScreenshotRef, setSessionConfig);
 
   // Auto-clear the server-log pulse: warn always after 3s; error after 3s
   // when the sidebar is open, otherwise persists until the user opens it.
@@ -17485,6 +17536,9 @@ export function App() {
     dispatch({ type: "SELECT_CHAT", chatId });
     setContextUsage(null);
     setTokenStats(null);
+    // Drop the previous chat's effective config; the SSE reconnect's status
+    // fetch repopulates it for the newly-selected chat.
+    setSessionConfig(null);
     try {
       const messages = await api(`/projects/${state.currentProjectId}/messages?userId=${encodeURIComponent(userId)}&chatId=${encodeURIComponent(chatId)}`);
       dispatch({ type: "SET_MESSAGES", messages: parsePersistedMessages(messages) });
@@ -17582,6 +17636,7 @@ export function App() {
   const ctx = useMemo(() => ({
     state, dispatch, userId, authUser, authEnabled, isAdmin, apiKey, setApiKey,
     llmProvider, setLlmProvider, llmModelId, setLlmModelId, llmEndpoint, setLlmEndpoint, llmApiVersion, setLlmApiVersion, thinkingLevel, setThinkingLevel,
+    sessionConfig, setSessionConfig,
     imageProvider, setImageProvider, imageModelId, setImageModelId, imageApiKey, setImageApiKey,
     serverConfig, serverManaged, imageServerManaged, imageConfigured, llmConfigured, reloadServerConfig,
     selectProject, deleteProject, unlinkProject, closeProject, createProject, loadProjects,
@@ -17613,7 +17668,7 @@ export function App() {
     projectLogs, setProjectLogs,
     architectMode, setArchitectMode,
     sidebarHandlePulse,
-  }), [state, userId, authUser, authEnabled, isAdmin, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, thinkingLevel, imageProvider, imageModelId, imageApiKey, serverConfig, serverManaged, imageServerManaged, imageConfigured, llmConfigured, reloadServerConfig, selectProject, deleteProject, unlinkProject, closeProject, createProject, loadProjects, confirmTakeover, cancelTakeover, reclaimProject, takeOverFromOtherUser, cancelServerLockHeld, retakeServerLock, releaseServerLock, handleSend, handleAbort, handleCompact, clearChat, selectChat, createChat, renameChat, deleteChat, refreshPreview, reloadMessages, reloadDiagrams, theme, toggleTheme, deployStatus, refreshDeployStatus, gitRemoteConfigured, refreshGitRemoteStatus, addScreenshotAttachment, pendingScreenshot, clearPendingScreenshot, onboardingStep, advanceOnboarding, dismissOnboarding, useCaseMermaid, useCasePulse, deploymentMermaid, deploymentPulse, componentMermaid, componentPulse, activityPulse, erPulse, contextUsage, tokenStats, projectCost, devFocus, sidebarWidth, t, lang, setLang, serverLogLines, previewState, applyPreviewState, captureScreenshotRef, projectSteps, projectLogs, architectMode, sidebarHandlePulse, serverLogPulse]);
+  }), [state, userId, authUser, authEnabled, isAdmin, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, thinkingLevel, sessionConfig, imageProvider, imageModelId, imageApiKey, serverConfig, serverManaged, imageServerManaged, imageConfigured, llmConfigured, reloadServerConfig, selectProject, deleteProject, unlinkProject, closeProject, createProject, loadProjects, confirmTakeover, cancelTakeover, reclaimProject, takeOverFromOtherUser, cancelServerLockHeld, retakeServerLock, releaseServerLock, handleSend, handleAbort, handleCompact, clearChat, selectChat, createChat, renameChat, deleteChat, refreshPreview, reloadMessages, reloadDiagrams, theme, toggleTheme, deployStatus, refreshDeployStatus, gitRemoteConfigured, refreshGitRemoteStatus, addScreenshotAttachment, pendingScreenshot, clearPendingScreenshot, onboardingStep, advanceOnboarding, dismissOnboarding, useCaseMermaid, useCasePulse, deploymentMermaid, deploymentPulse, componentMermaid, componentPulse, activityPulse, erPulse, contextUsage, tokenStats, projectCost, devFocus, sidebarWidth, t, lang, setLang, serverLogLines, previewState, applyPreviewState, captureScreenshotRef, projectSteps, projectLogs, architectMode, sidebarHandlePulse, serverLogPulse]);
 
   if (needsLogin) {
     return (
