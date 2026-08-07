@@ -1,13 +1,10 @@
 import fs from "fs/promises";
 import path from "path";
-import { exec } from "child_process";
-import { promisify } from "util";
-import { findLatestVersionTag, tagToVersion } from "./git-tag-utils.js";
+import { findLatestVersionTag, tagToVersion, buildAuthUrl } from "./git-tag-utils.js";
+import { git, tryGit, secretsInUrl } from "./exec-utils.js";
 import { withGitLock } from "./git-lock.js";
 import { systemPaths } from "./paths.js";
 import { getLocalSystemPrompt, getSystemPromptRepoConfig } from "./admin-system-prompt.js";
-
-const execAsync = promisify(exec);
 
 const CACHE_DIR = systemPaths.systemPromptCache();
 
@@ -17,13 +14,6 @@ const PROMPT_FILES = ["SYSTEM_PROMPT.md", "system-prompt.md", "SYSTEM_PROMPT.txt
 export interface SystemPromptResult {
   prompt: string;
   version: string;
-}
-
-/**
- * Build authenticated URL by embedding PAT before the host.
- */
-function buildAuthUrl(url: string, pat: string): string {
-  return url.replace("https://", `https://${pat}@`);
 }
 
 /**
@@ -39,15 +29,11 @@ function stripFrontmatter(content: string): string {
  * Returns the tag name or null if HEAD is not at a tag.
  */
 async function getCurrentTag(repoDir: string): Promise<string | null> {
-  try {
-    const { stdout } = await execAsync("git describe --tags --exact-match HEAD", {
-      cwd: repoDir,
-      timeout: 5000,
-    });
-    return stdout.trim() || null;
-  } catch {
-    return null;
-  }
+  const res = await tryGit(["describe", "--tags", "--exact-match", "HEAD"], {
+    cwd: repoDir,
+    timeout: 5000,
+  });
+  return res.code === 0 ? res.stdout.trim() || null : null;
 }
 
 /**
@@ -92,9 +78,9 @@ async function cloneAtTag(
     console.log(`[system-prompt] Cloning at ${latestTag}...`);
     await fs.rm(CACHE_DIR, { recursive: true, force: true });
     await fs.mkdir(CACHE_DIR, { recursive: true });
-    await execAsync(
-      `git clone --depth 1 --branch ${latestTag} "${authUrl}" "${CACHE_DIR}"`,
-      { timeout: 30000 },
+    await git(
+      ["clone", "--depth", "1", "--branch", latestTag, "--", authUrl, CACHE_DIR],
+      { timeout: 30000, redact: secretsInUrl(authUrl) },
     );
     console.log(`[system-prompt] Cloned at ${latestTag}`);
     return latestTag;

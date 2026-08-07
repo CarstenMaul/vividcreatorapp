@@ -49,11 +49,40 @@ export interface ResolveResult {
   appliedMode?: RootChangeMode;
 }
 
+/**
+ * Non-blocking hazards the user must acknowledge before a root is staged.
+ *  - networkDrive: a mapped network drive. Builds and installs are much slower,
+ *    and node_modules cannot be moved off the share (no junctions over SMB).
+ *  - cloudSync: OneDrive/Dropbox. Works, and node_modules is diverted to a local
+ *    cache so the sync engine isn't handed tens of thousands of files.
+ */
+export type RootWarning = "networkDrive" | "cloudSync";
+
+/**
+ * Subset of src/volume-info.ts's VolumeInfo. Declared structurally rather than
+ * imported: electron/tsconfig.json sets rootDir to electron/, so this module
+ * cannot reference src/. The classifier is injected instead (see `classify`).
+ */
+export interface RootVolumeInfo {
+  kind: "local" | "cloudSync" | "networkMapped" | "networkUnc" | "unknown";
+  uncTarget?: string;
+  driveLetterPath?: string;
+  syncProvider?: string;
+}
+
 export interface ValidateResult {
   ok: boolean;
   error?: string;
-  /** Absolute, normalized target path (present when ok). */
+  /**
+   * Absolute, normalized target path (present when ok). For a UNC path that is
+   * already mapped to a drive letter this is the drive-letter spelling, not what
+   * the user picked — see validateRootChange.
+   */
   normalized?: string;
+  /** Hazards the UI must show and the caller must echo back to stage. */
+  warnings?: RootWarning[];
+  /** What the target volume turned out to be, for messaging. */
+  volume?: RootVolumeInfo;
 }
 
 const IS_WIN = process.platform === "win32";
@@ -89,12 +118,21 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function readdirSafe(dir: string): Promise<string[] | null> {
+/**
+ * `{ entries: null }` means "doesn't exist yet", which is a perfectly good
+ * target. `{ unreadable: true }` means it exists but we can't look inside —
+ * a disconnected share, a permission-denied folder, a dead drive letter.
+ *
+ * This used to rethrow anything that wasn't ENOENT, so pointing at an
+ * unreachable network path escaped validateRootChange as a raw EPERM and
+ * surfaced in the UI as an unhandled stack trace instead of an explanation.
+ */
+async function readdirSafe(dir: string): Promise<{ entries: string[] | null; unreadable: boolean }> {
   try {
-    return await fs.readdir(dir);
+    return { entries: await fs.readdir(dir), unreadable: false };
   } catch (err: any) {
-    if (err?.code === "ENOENT") return null;
-    throw err;
+    if (err?.code === "ENOENT") return { entries: null, unreadable: false };
+    return { entries: null, unreadable: true };
   }
 }
 
@@ -163,19 +201,52 @@ export async function validateRootChange(args: {
   newRoot: string;
   mode: RootChangeMode;
   currentRoot: string;
+  /** Injected src/volume-info.ts classifier. Omit to skip volume checks. */
+  classify?: (p: string) => Promise<RootVolumeInfo>;
 }): Promise<ValidateResult> {
   const raw = typeof args.newRoot === "string" ? args.newRoot.trim() : "";
   if (!raw) return { ok: false, error: "empty" };
   if (args.mode !== "move" && args.mode !== "new" && args.mode !== "existing") return { ok: false, error: "mode" };
 
-  const newRoot = path.resolve(raw);
+  let newRoot = path.resolve(raw);
   if (!path.isAbsolute(newRoot)) return { ok: false, error: "absolute" };
+
+  // Volume checks come first: a UNC root can never work, so there is no point
+  // probing its contents or writability and reporting some downstream symptom.
+  const warnings: RootWarning[] = [];
+  let volume: RootVolumeInfo | undefined;
+  if (args.classify) {
+    try {
+      volume = await args.classify(newRoot);
+    } catch {
+      volume = undefined; // classification is advisory; never block on its failure
+    }
+  }
+  if (volume) {
+    if (volume.kind === "networkUnc") {
+      // A `\\server\share` root is unusable: cmd.exe refuses it as a working
+      // directory, and vite's normalizePath() collapses the leading `\\` so the
+      // build resolves its entry against a path that does not exist. If the same
+      // share is already mapped to a drive letter, silently prefer that spelling
+      // — same folder, and everything downstream works.
+      if (!volume.driveLetterPath) return { ok: false, error: "uncPath", volume };
+      newRoot = path.resolve(volume.driveLetterPath);
+      warnings.push("networkDrive");
+    } else if (volume.kind === "networkMapped") {
+      warnings.push("networkDrive");
+    } else if (volume.kind === "cloudSync") {
+      warnings.push("cloudSync");
+    }
+  }
 
   const current = path.resolve(args.currentRoot);
   if (samePath(newRoot, current)) return { ok: false, error: "same" };
   if (isInside(newRoot, current) || isInside(current, newRoot)) return { ok: false, error: "nested" };
 
-  const entries = await readdirSafe(newRoot);
+  const { entries, unreadable } = await readdirSafe(newRoot);
+  // Exists but unlistable (offline share, denied ACL) — nothing below can give a
+  // meaningful answer, and "can't be written to" is the accurate advice.
+  if (unreadable) return { ok: false, error: "notWritable", warnings, volume };
   const hasVcaData = !!entries && entries.some((name) => VCA_LAYOUT_MARKERS.has(name));
   if (args.mode === "move") {
     if (entries && entries.length > 0) return { ok: false, error: "notEmpty" };
@@ -197,7 +268,7 @@ export async function validateRootChange(args: {
     return { ok: false, error: "notWritable" };
   }
 
-  return { ok: true, normalized: newRoot };
+  return { ok: true, normalized: newRoot, warnings, volume };
 }
 
 /**

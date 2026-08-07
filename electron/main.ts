@@ -266,6 +266,20 @@ function registerStorageIpc(w: BrowserWindow, defaultRoot: string): void {
     return { root: currentRoot(), defaultRoot, pending: cfg.pending ?? null };
   });
 
+  // The volume classifier lives in the server bundle (src/volume-info.ts), which
+  // electron/tsconfig.json cannot import from directly. Load it lazily from dist,
+  // mirroring how bundled-runtime is pulled in at boot. Storage IPC only fires
+  // long after dist/ is available.
+  const loadClassifier = async (): Promise<((p: string) => Promise<any>) | undefined> => {
+    try {
+      const mod = await import("../dist/volume-info.js");
+      return mod.classifyVolume;
+    } catch (err) {
+      log(`volume classifier unavailable: ${String(err)}`);
+      return undefined;
+    }
+  };
+
   ipcMain.handle("vca:pickFolder", async () => {
     const res = await dialog.showOpenDialog(w, {
       title: "Choose a workspace folder",
@@ -275,19 +289,70 @@ function registerStorageIpc(w: BrowserWindow, defaultRoot: string): void {
     return res.filePaths[0];
   });
 
+  // Classify a folder without staging anything, so the picker can warn about a
+  // network or cloud-synced target before the user commits to a move/new/existing
+  // mode rather than after.
+  ipcMain.handle("vca:inspectFolder", async (_e, arg: unknown) => {
+    const p = typeof arg === "string" ? arg : (arg as { path?: unknown })?.path;
+    if (typeof p !== "string" || !p.trim()) return null;
+    const classify = await loadClassifier();
+    if (!classify) return null;
+    try {
+      const v = await classify(p);
+      return { kind: v.kind, uncTarget: v.uncTarget ?? null, driveLetterPath: v.driveLetterPath ?? null, syncProvider: v.syncProvider ?? null };
+    } catch {
+      return null;
+    }
+  });
+
+  // Offer a way out of the UNC dead end: map the share to a drive letter and
+  // hand back the drive-letter path for the user to pick instead.
+  ipcMain.handle("vca:mapNetworkDrive", async (_e, arg: unknown) => {
+    const share = typeof arg === "string" ? arg : (arg as { share?: unknown })?.share;
+    if (typeof share !== "string" || !share.trim()) return { ok: false, error: "empty" };
+    try {
+      const mod = await import("../dist/volume-info.js");
+      const mapped = await mod.mapDriveLetter(share);
+      if (!mapped) return { ok: false, error: "mapFailed" };
+      log(`mapped ${share} -> ${mapped}`);
+      return { ok: true, path: mapped };
+    } catch (err) {
+      log(`mapNetworkDrive failed: ${String(err)}`);
+      return { ok: false, error: "mapFailed" };
+    }
+  });
+
   ipcMain.handle("vca:stageRootChange", async (_e, arg: unknown) => {
-    const a = (arg ?? {}) as { newRoot?: unknown; mode?: unknown };
+    const a = (arg ?? {}) as { newRoot?: unknown; mode?: unknown; acceptedWarnings?: unknown };
     const newRoot = typeof a.newRoot === "string" ? a.newRoot : "";
     const mode = a.mode === "move" || a.mode === "new" || a.mode === "existing" ? a.mode : "";
-    const v = await validateRootChange({ newRoot, mode: mode as "move" | "new" | "existing", currentRoot: currentRoot() });
-    if (!v.ok) return { ok: false, error: v.error };
+    const accepted = Array.isArray(a.acceptedWarnings)
+      ? a.acceptedWarnings.filter((x): x is string => typeof x === "string")
+      : [];
+    const v = await validateRootChange({
+      newRoot,
+      mode: mode as "move" | "new" | "existing",
+      currentRoot: currentRoot(),
+      classify: await loadClassifier(),
+    });
+    if (!v.ok) return { ok: false, error: v.error, volume: v.volume ?? null };
+
+    // Refuse to stage a hazard the user was never shown. Without this a stale
+    // renderer (or one that skipped the confirm step) could silently commit a
+    // network/cloud root, and the change only takes effect at the next boot —
+    // long after anyone could connect cause and effect.
+    const unacknowledged = (v.warnings ?? []).filter((wn) => !accepted.includes(wn));
+    if (unacknowledged.length > 0) {
+      return { ok: false, error: "unacknowledged", warnings: unacknowledged, volume: v.volume ?? null };
+    }
+
     const cfg = await readRootConfig(userDataDir);
     await writeRootConfig(userDataDir, {
       root: cfg.root ?? currentRoot(),
       pending: { newRoot: v.normalized as string, mode: mode as "move" | "new" | "existing", requestedAt: new Date().toISOString() },
     });
     log(`staged workspace root change: mode=${mode} newRoot=${v.normalized}`);
-    return { ok: true };
+    return { ok: true, normalized: v.normalized, warnings: v.warnings ?? [] };
   });
 
   ipcMain.handle("vca:cancelPendingChange", async () => {

@@ -1,6 +1,5 @@
 import { randomUUID } from "crypto";
-import { spawn, exec, type ChildProcess, type SpawnOptions } from "child_process";
-import { promisify } from "util";
+import { spawn, type ChildProcess, type SpawnOptions } from "child_process";
 import fs from "fs/promises";
 import fss from "fs";
 import path from "path";
@@ -9,8 +8,9 @@ import { withGitLock } from "./git-lock.js";
 import { parseVersion, DEFAULT_APP_VERSION } from "./app-version.js";
 import { stopAppProcess, rmRetry } from "./app-process-manager.js";
 import { getDecryptedEnvMap } from "./env-vars-store.js";
+import { git, tryGit, tryRun } from "./exec-utils.js";
+import { bundledGitExe, resolveNpm } from "./bundled-runtime.js";
 
-const execAsync = promisify(exec);
 const IS_WINDOWS = process.platform === "win32";
 
 /**
@@ -204,6 +204,21 @@ interface SpawnRunOptions extends SpawnOptions {
   label?: string;
 }
 
+/**
+ * Map a logical command name onto a real executable, so runCmd never needs a
+ * shell. `npm` matters twice over: it ships as npm.cmd on Windows, which Node
+ * refuses to spawn without `shell: true`, and a shell means cmd.exe, which
+ * cannot hold a UNC working directory. See src/exec-utils.ts for the full story.
+ */
+function resolveCommand(command: string, args: string[]): { file: string; argv: string[] } {
+  if (command === "npm") {
+    const { exe, prefixArgs } = resolveNpm();
+    return { file: exe, argv: [...prefixArgs, ...args] };
+  }
+  if (command === "git") return { file: bundledGitExe() ?? "git", argv: args };
+  return { file: command, argv: args };
+}
+
 async function runCmd(
   rec: JobRecord,
   command: string,
@@ -213,14 +228,19 @@ async function runCmd(
   const label = opts.label || [command, ...args].join(" ");
   logEcho(rec, `$ ${label}`);
 
+  const { file, argv } = resolveCommand(command, args);
+
   let child: ChildProcess;
   try {
-    child = spawn(command, args, {
+    child = spawn(file, argv, {
       ...opts,
       detached: !IS_WINDOWS,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      shell: IS_WINDOWS,
+      // Never a shell. Under `shell`, Node joins argv with plain spaces and no
+      // quoting, so `git commit -m "release v1.2.3"` reached git as `-m release`
+      // plus a stray pathspec — every Windows release commit was malformed.
+      shell: false,
     });
   } catch (err: any) {
     appendLog(rec, `[spawn failed] ${err?.message || String(err)}`, "stderr");
@@ -278,7 +298,7 @@ async function terminateGroup(child: ChildProcess, pid: number): Promise<void> {
     const onExit = () => finish();
     child.once("exit", onExit);
     try {
-      if (IS_WINDOWS) exec(`taskkill /pid ${pid} /T /F`, () => { /* exit listener finalizes */ });
+      if (IS_WINDOWS) void tryRun("taskkill", ["/pid", String(pid), "/T", "/F"]).catch(() => { /* exit listener finalizes */ });
       else process.kill(-pid, "SIGTERM");
     } catch {
       finish();
@@ -286,7 +306,7 @@ async function terminateGroup(child: ChildProcess, pid: number): Promise<void> {
     }
     forceTimer = setTimeout(() => {
       try {
-        if (IS_WINDOWS) exec(`taskkill /pid ${pid} /T /F`, () => {});
+        if (IS_WINDOWS) void tryRun("taskkill", ["/pid", String(pid), "/T", "/F"]).catch(() => {});
         else process.kill(-pid, "SIGKILL");
       } catch { /* ignore */ }
       setTimeout(finish, FORCE_KILL_GRACE_MS);
@@ -1070,27 +1090,23 @@ async function writeWorkspaceVersion(workspacePath: string, version: string): Pr
 }
 
 async function gitCurrentBranch(workspacePath: string): Promise<string> {
-  const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: workspacePath });
+  const { stdout } = await git(["rev-parse", "--abbrev-ref", "HEAD"], { cwd: workspacePath });
   return stdout.trim();
 }
 
 async function gitTagExists(workspacePath: string, tag: string, remote: string): Promise<boolean> {
+  const local = await tryGit(["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { cwd: workspacePath });
+  if (local.code === 0) return true;
   try {
-    await execAsync(`git rev-parse --verify ${JSON.stringify(tag)}`, { cwd: workspacePath });
-    return true;
-  } catch { /* not local */ }
-  try {
-    const { stdout } = await execAsync(`git ls-remote --tags ${JSON.stringify(remote)} ${JSON.stringify(tag)}`, { cwd: workspacePath });
+    const { stdout } = await git(["ls-remote", "--tags", remote, tag], { cwd: workspacePath });
     if (stdout.trim()) return true;
-  } catch { /* may fail */ }
+  } catch { /* offline or no such remote */ }
   return false;
 }
 
 async function isGitRepo(workspacePath: string): Promise<boolean> {
-  try {
-    await execAsync("git rev-parse --is-inside-work-tree", { cwd: workspacePath });
-    return true;
-  } catch { return false; }
+  const res = await tryGit(["rev-parse", "--is-inside-work-tree"], { cwd: workspacePath });
+  return res.code === 0;
 }
 
 export interface GitReleaseInput {
@@ -1188,11 +1204,11 @@ export async function readProjectDeployInfo(workspacePath: string): Promise<Proj
   if (repo) {
     try { currentBranch = await gitCurrentBranch(workspacePath); } catch { /* ignore */ }
     try {
-      const { stdout } = await execAsync("git status --porcelain", { cwd: workspacePath });
+      const { stdout } = await git(["status", "--porcelain"], { cwd: workspacePath });
       dirty = stdout.trim().length > 0;
     } catch { /* ignore */ }
     try {
-      const { stdout } = await execAsync("git describe --tags --abbrev=0", { cwd: workspacePath });
+      const { stdout } = await git(["describe", "--tags", "--abbrev=0"], { cwd: workspacePath });
       latestTag = stdout.trim() || null;
     } catch { /* no tags yet */ }
   }

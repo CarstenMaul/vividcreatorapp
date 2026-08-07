@@ -15,8 +15,23 @@ contextBridge.exposeInMainWorld("vcaDesktop", {
   getStorageInfo: () => ipcRenderer.invoke("vca:getStorageInfo"),
   /** Native folder picker; resolves to the chosen absolute path or null. */
   pickFolder: () => ipcRenderer.invoke("vca:pickFolder"),
-  /** Validate + stage a change; resolves to { ok, error? }. */
-  stageRootChange: (arg: { newRoot: string; mode: RootChangeMode }) =>
+  /**
+   * Classify a folder without staging: resolves to
+   * { kind, uncTarget, driveLetterPath, syncProvider } or null. Lets the picker
+   * warn about network/cloud targets before a mode is chosen.
+   */
+  inspectFolder: (path: string) => ipcRenderer.invoke("vca:inspectFolder", path),
+  /**
+   * Map a `\\server\share` to a free drive letter via `net use`; resolves to
+   * { ok, path? }. The remedy offered when a UNC root is rejected.
+   */
+  mapNetworkDrive: (share: string) => ipcRenderer.invoke("vca:mapNetworkDrive", share),
+  /**
+   * Validate + stage a change; resolves to { ok, error?, warnings?, volume? }.
+   * `acceptedWarnings` must contain every warning code the UI displayed, or the
+   * main process refuses with error "unacknowledged".
+   */
+  stageRootChange: (arg: { newRoot: string; mode: RootChangeMode; acceptedWarnings?: string[] }) =>
     ipcRenderer.invoke("vca:stageRootChange", arg),
   /** Clear any staged change. */
   cancelPendingChange: () => ipcRenderer.invoke("vca:cancelPendingChange"),

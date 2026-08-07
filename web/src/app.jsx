@@ -8222,6 +8222,9 @@ function StorageTab({ t }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [picked, setPicked] = useState(null); // folder awaiting move/new/existing choice
+  const [volume, setVolume] = useState(null); // { kind, uncTarget, driveLetterPath, syncProvider }
+  const [accepted, setAccepted] = useState(false); // "I understand" for network/cloud roots
+  const [uncShare, setUncShare] = useState(null); // share to offer a drive mapping for
 
   const load = async () => {
     if (!bridge) { setLoading(false); return; }
@@ -8248,17 +8251,77 @@ function StorageTab({ t }) {
       case "hasData": return t("settings.storage.errHasData") || "That folder already contains VCA data. Choose an empty folder to start fresh.";
       case "noData": return t("settings.storage.errNoData") || "That folder doesn't contain a VCA workspace. Choose the folder that already holds your VCA data.";
       case "notWritable": return t("settings.storage.errNotWritable") || "That folder can't be written to. Choose another location.";
+      case "uncPath": return t("settings.storage.errUnc") || "VCA can't use a \\\\server\\share path directly — the Windows build tools don't support it. Map it to a drive letter (for example Y:) and choose that instead.";
+      case "unacknowledged": return t("settings.storage.errUnacknowledged") || "Please confirm you understand the warning before continuing.";
       default: return t("settings.storage.errGeneric") || "That folder can't be used. Choose another location.";
+    }
+  };
+
+  // Hazards that don't block, but must be acknowledged. Mirrors the main
+  // process's validateRootChange so the dialog can show them before staging.
+  const warningsFor = (vol) => {
+    if (!vol) return [];
+    if (vol.kind === "networkMapped" || vol.kind === "networkUnc") return ["networkDrive"];
+    if (vol.kind === "cloudSync") return ["cloudSync"];
+    return [];
+  };
+
+  const warningText = (code) => {
+    switch (code) {
+      case "networkDrive":
+        return t("settings.storage.warnNetworkDrive") || "This folder is on a network drive. VCA will work, but builds and dependency installs will be noticeably slower, and each project's dependencies have to stay on the share. Only one person can work on a project at a time.";
+      case "cloudSync":
+        return t("settings.storage.warnCloudSync") || "This folder is synced to the cloud. VCA will keep each project's dependencies in a local cache instead, so the sync doesn't have to handle tens of thousands of files.";
+      default:
+        return "";
     }
   };
 
   const chooseFolder = async () => {
     setError("");
+    setUncShare(null);
     try {
       const folder = await bridge.pickFolder();
-      if (folder) setPicked(folder);
+      if (!folder) return;
+      let vol = null;
+      try {
+        vol = bridge.inspectFolder ? await bridge.inspectFolder(folder) : null;
+      } catch { /* classification is advisory — fall through unclassified */ }
+
+      // A raw \\server\share root can never build. Don't offer the mode choice;
+      // surface the remedy (map it to a drive letter) instead.
+      if (vol && vol.kind === "networkUnc" && !vol.driveLetterPath) {
+        setUncShare(vol.uncTarget || folder);
+        setError(errorText("uncPath"));
+        return;
+      }
+      setVolume(vol);
+      setAccepted(false);
+      setPicked(folder);
     } catch (err) {
       setError(err?.message || String(err));
+    }
+  };
+
+  const mapDrive = async () => {
+    if (!uncShare || !bridge.mapNetworkDrive) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await bridge.mapNetworkDrive(uncShare);
+      if (!res || !res.ok) {
+        setError(t("settings.storage.mapDriveFailed") || "Couldn't map that share to a drive letter. Map it in File Explorer, then choose the drive letter here.");
+      } else {
+        setUncShare(null);
+        setError("");
+        setVolume({ kind: "networkMapped" });
+        setAccepted(false);
+        setPicked(res.path);
+      }
+    } catch (err) {
+      setError(err?.message || String(err));
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -8267,7 +8330,7 @@ function StorageTab({ t }) {
     setBusy(true);
     setError("");
     try {
-      const res = await bridge.stageRootChange({ newRoot: picked, mode });
+      const res = await bridge.stageRootChange({ newRoot: picked, mode, acceptedWarnings: warningsFor(volume) });
       if (!res || !res.ok) {
         setError(errorText(res && res.error));
         setPicked(null);
@@ -8349,6 +8412,15 @@ function StorageTab({ t }) {
 
       {error && <div style={{ color: "var(--error, #dc2626)", fontSize: 12 }}>{error}</div>}
 
+      {/* A rejected UNC root is a dead end unless we offer the way out. */}
+      {uncShare && (
+        <div className="modal-actions" style={{ marginTop: 4 }}>
+          <button type="button" className="btn-secondary" disabled={busy} onClick={mapDrive}>
+            <HardDrive size={14} /> {t("settings.storage.mapDriveBtn") || "Map a drive letter"}
+          </button>
+        </div>
+      )}
+
       <div style={{ marginTop: 10, fontSize: 11, color: "var(--text-muted)" }}>
         {t("settings.storage.restartNote") || "A folder change takes effect the next time you start VCA."}
       </div>
@@ -8366,20 +8438,40 @@ function StorageTab({ t }) {
               {t("settings.storage.choiceMessage") || "What should happen with your current projects and settings?"}
             </AlertDialog.Description>
             <code style={codeStyle}>{picked || ""}</code>
+
+            {/* Network / cloud-synced targets work, but with consequences the
+                user only discovers much later — the change applies at the next
+                boot. Show them here and require an explicit acknowledgement,
+                which stageRootChange re-checks before writing anything. */}
+            {warningsFor(volume).length > 0 && (
+              <div style={{ background: "#fffbeb", border: "1px solid #fcd34d", color: "#92400e", fontSize: 12, padding: 10, borderRadius: 6, marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+                {warningsFor(volume).map((code) => (
+                  <div key={code} style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 1 }} />
+                    <span>{warningText(code)}</span>
+                  </div>
+                ))}
+                <label style={{ display: "flex", gap: 6, alignItems: "center", fontWeight: 600, cursor: "pointer" }}>
+                  <input type="checkbox" checked={accepted} disabled={busy} onChange={(e) => setAccepted(e.target.checked)} />
+                  {t("settings.storage.warnAccept") || "I understand"}
+                </label>
+              </div>
+            )}
+
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}>
-              <button type="button" className="btn-primary" disabled={busy} onClick={() => stage("move")}>
+              <button type="button" className="btn-primary" disabled={busy || (warningsFor(volume).length > 0 && !accepted)} onClick={() => stage("move")}>
                 {t("settings.storage.moveOption") || "Move my current workspace here"}
               </button>
               <span style={{ marginLeft: 2, color: "var(--text-muted)", fontSize: 11 }}>
                 {t("settings.storage.moveHint") || "Copies everything to the new folder and switches to it."}
               </span>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => stage("existing")} style={{ marginTop: 4 }}>
+              <button type="button" className="btn-secondary" disabled={busy || (warningsFor(volume).length > 0 && !accepted)} onClick={() => stage("existing")} style={{ marginTop: 4 }}>
                 {t("settings.storage.existingOption") || "Use the workspace already in this folder"}
               </button>
               <span style={{ marginLeft: 2, color: "var(--text-muted)", fontSize: 11 }}>
                 {t("settings.storage.existingHint") || "Points VCA at data already here, copying nothing. Your current data stays where it is."}
               </span>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => stage("new")} style={{ marginTop: 4 }}>
+              <button type="button" className="btn-secondary" disabled={busy || (warningsFor(volume).length > 0 && !accepted)} onClick={() => stage("new")} style={{ marginTop: 4 }}>
                 {t("settings.storage.newOption") || "Start a fresh, empty workspace here"}
               </button>
               <span style={{ marginLeft: 2, color: "var(--text-muted)", fontSize: 11 }}>

@@ -19,6 +19,7 @@ import { loadEnvVars, applyEnvVarsToProcess } from "./env-vars-store.js";
 import { initAllProviderAuth } from "./provider-auth-registry.js";
 import { adminPaths } from "./paths.js";
 import { applyAppNamePlaceholders, getAppNameConfig } from "./app-name-config.js";
+import { releaseAllLeases } from "./project-lock.js";
 import fs from "fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -291,6 +292,9 @@ export async function stopServer(): Promise<void> {
   startPromise = null;
   await new Promise<void>((resolve) => s.close(() => resolve()));
   await shutdownAll();
+  // Hand back any cross-machine project leases now rather than making a
+  // colleague wait out the stale window for a VCA that exited cleanly.
+  await releaseAllLeases().catch(() => { /* best effort on the way out */ });
 }
 
 // Auto-start for container/local/dev. The Electron main process sets

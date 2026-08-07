@@ -8,9 +8,14 @@ import http from "http";
 import net from "net";
 import { ensureDependencies, clearNodeModules } from "./node-modules-store.js";
 import { resolveAppNode } from "./bundled-runtime.js";
+import { classifyVolume, isNonLocalVolume } from "./volume-info.js";
+import { npm, tryRun } from "./exec-utils.js";
 import { sanitizeChildEnv } from "./env-sanitize.js";
 import { getDecryptedEnvMap } from "./env-vars-store.js";
 
+// Only for the two Linux-only `ss` probes below, which genuinely want a shell
+// (they rely on `2>/dev/null`) and pass no cwd, so the UNC hazard that drove
+// everything else onto src/exec-utils.ts does not apply to them.
 const execAsync = promisify(exec);
 
 const IS_WINDOWS = process.platform === "win32";
@@ -275,6 +280,44 @@ async function readProjectScripts(workspacePath: string): Promise<Record<string,
   }
 }
 
+// Best-effort mitigation for legacy projects on network storage.
+//
+// On a workspace root that is a mapped network drive, `vite build` has been seen
+// to fail with a root spelled as the drive's UNC target:
+//   [UNRESOLVED_ENTRY] Cannot resolve entry module ../../server/share/.../web/index.html
+// The arithmetic is certain: vite computes its root as
+// `normalizePath(path.resolve(config.root))`, and normalizePath is
+// `path.posix.normalize(slash(id))`, which collapses the leading `\\` of a UNC
+// path and destroys the server component. What is NOT established is which
+// component canonicalises the drive letter into that UNC spelling in the first
+// place — it is not npm, not vite's config loader, and not vite's JS-side
+// realpath (all three verified to preserve the drive-letter spelling). The
+// remaining suspect is rolldown's native Rust resolver, which cannot be observed
+// from a `subst` drive because subst never yields a UNC path, and SMB loopback
+// is blocked on the dev machine.
+//
+// Current templates sidestep the whole question by never reading __dirname (see
+// the template's vite.config.js), but every project scaffolded before that keeps
+// its own copy of the old config. For those, `--configLoader native` replaces
+// the rolldown config bundling with a plain dynamic import, so the config's path
+// only ever passes through Node's ESM loader — which resolves symlinks but not
+// drive mappings. That makes it a plausible, zero-touch mitigation rather than a
+// proven fix; the actual repair is rewriting the project's config.
+//
+// Scoped to non-local volumes and to the stock `vite build` script: an agent may
+// have replaced the build with something that rejects vite's flags.
+const STOCK_VITE_BUILD_RE = /(^|&&)\s*vite build\s*$/;
+
+async function viteConfigLoaderArgs(workspacePath: string, buildScript: string): Promise<string[]> {
+  if (!STOCK_VITE_BUILD_RE.test(buildScript)) return [];
+  try {
+    const volume = await classifyVolume(workspacePath);
+    return isNonLocalVolume(volume) ? ["--", "--configLoader", "native"] : [];
+  } catch {
+    return []; // classification is best-effort; never block a build on it
+  }
+}
+
 // Run `npm run build` once before spawning the preview, if the project has a
 // build script. Vite-bundled templates output to public/, which server.js then
 // serves statically. Old templates without a build script no-op.
@@ -291,9 +334,11 @@ async function maybeRunProjectBuild(
     console.log(`[${projectKey}] [build] ${line}`);
   };
 
-  emit("npm run build (Vite frontend bundle)");
+  const args = ["run", "build", ...await viteConfigLoaderArgs(workspacePath, scripts.build)];
+
+  emit(`npm ${args.join(" ")} (Vite frontend bundle)`);
   try {
-    const { stdout, stderr } = await execAsync("npm run build", {
+    const { stdout, stderr } = await npm(args, {
       cwd: workspacePath,
       timeout: 5 * 60 * 1000,
       maxBuffer: 50 * 1024 * 1024,
@@ -418,7 +463,7 @@ async function terminateProcessGroup(child: ChildProcess, pid: number): Promise<
         // taskkill /T walks the child tree; /F forces termination. There is
         // no graceful-then-force step on Windows — taskkill /F is the only
         // way to reliably kill `node.exe --watch` + any spawned children.
-        exec(`taskkill /pid ${pid} /T /F`, () => { /* exit listener finalizes */ });
+        void tryRun("taskkill", ["/pid", String(pid), "/T", "/F"]).catch(() => { /* exit listener finalizes */ });
       } else {
         process.kill(-pid, "SIGTERM");
       }
@@ -430,7 +475,7 @@ async function terminateProcessGroup(child: ChildProcess, pid: number): Promise<
     forceKillTimer = setTimeout(() => {
       try {
         if (IS_WINDOWS) {
-          exec(`taskkill /pid ${pid} /T /F`, () => {});
+          void tryRun("taskkill", ["/pid", String(pid), "/T", "/F"]).catch(() => {});
         } else {
           process.kill(-pid, "SIGKILL");
         }

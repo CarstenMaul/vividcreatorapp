@@ -7,10 +7,12 @@ import { getCodexCredentialStore, hasCodexCredential } from "./codex-auth.js";
 import { getKimiCredentialStore, hasKimiCredential } from "./kimi-auth.js";
 import { getOpenRouterCredentialStore, hasOpenRouterCredential } from "./openrouter-auth.js";
 import { bundledBashExe } from "./bundled-runtime.js";
+import { git, tryGit } from "./exec-utils.js";
+import { acquireLease, releaseLease, describeSelf, leasingEnabled } from "./project-lock.js";
 import { resolveWorkspaceRealRoot, buildHardenedToolDefinitions } from "./agent-sandbox.js";
 import { atomicWriteJson, copyDir } from "./fs-utils.js";
 import { addProjectCost, readProjectCostIfExists } from "./project-cost.js";
-import { exec, execFile } from "child_process";
+import { execFile } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
@@ -52,7 +54,6 @@ import { loadMcpToolsForAllEnabled } from "./mcp-client.js";
 import { userPaths, projectPaths, listUserDirs, PROJECT_ICON_FILENAME } from "./paths.js";
 import { loadPublicUser, createEntraUser, type PublicUser } from "./user-store.js";
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
 function getSkillsDir(userId: string): string {
@@ -2701,9 +2702,9 @@ async function initWorkspace(workspacePath: string, projectId: string, projectMe
   try {
     await fs.access(path.join(workspacePath, ".git"));
   } catch {
-    await execAsync("git init", { cwd: workspacePath });
-    await execAsync('git config user.email "vca@local"', { cwd: workspacePath });
-    await execAsync('git config user.name "VCA"', { cwd: workspacePath });
+    await git(["init"], { cwd: workspacePath });
+    await git(["config", "user.email", "vca@local"], { cwd: workspacePath });
+    await git(["config", "user.name", "VCA"], { cwd: workspacePath });
 
     // Copy template files into workspace. With no specific template
     // requested, fall back to the first entry in the admin templates list.
@@ -2751,26 +2752,30 @@ async function initWorkspace(workspacePath: string, projectId: string, projectMe
     await ensureProjectGitignore(workspacePath);
 
     // Initial commit with template
-    await execAsync("git add -A", { cwd: workspacePath });
-    await execAsync('git commit -m "Initial template"', { cwd: workspacePath });
+    await git(["add", "-A"], { cwd: workspacePath });
+    await git(["commit", "-m", "Initial template"], { cwd: workspacePath });
   }
 }
 
 async function autoCommit(workspacePath: string, promptText: string): Promise<void> {
   return withGitLock(workspacePath, async () => {
     try {
-      await execAsync("git add -A", { cwd: workspacePath });
-      const { stdout } = await execAsync("git status --porcelain", { cwd: workspacePath });
+      await git(["add", "-A"], { cwd: workspacePath });
+      const { stdout } = await git(["status", "--porcelain"], { cwd: workspacePath });
       if (stdout.trim()) {
-        const msg = promptText.slice(0, 72).replace(/[`$"\\]/g, "");
-        await execAsync(`git commit -m "${msg}"`, { cwd: workspacePath });
+        // No shell-metacharacter stripping needed now that the message is a real
+        // argv entry rather than part of a command string. The fallback matters:
+        // a prompt made entirely of punctuation used to produce `-m ""`, which
+        // git rejects, failing the whole commit.
+        const msg = promptText.slice(0, 72).trim() || "Changes";
+        await git(["commit", "-m", msg], { cwd: workspacePath });
         console.log(`[autoCommit] Committed: ${msg}`);
 
         // Auto-push if a remote is configured
         try {
-          const { stdout: remoteUrl } = await execAsync("git remote get-url origin", { cwd: workspacePath });
+          const { stdout: remoteUrl } = await git(["remote", "get-url", "origin"], { cwd: workspacePath });
           if (remoteUrl.trim()) {
-            await execAsync("git push -u origin HEAD", { cwd: workspacePath });
+            await git(["push", "-u", "origin", "HEAD"], { cwd: workspacePath });
             console.log("[autoCommit] Pushed to remote");
           }
         } catch {
@@ -2847,8 +2852,8 @@ async function generateCommitMessage(workspacePath: string, userPrompt: string):
   let diffText = "";
   let statText = "";
   try {
-    const { stdout: stat } = await execAsync("git diff --cached --stat", { cwd: workspacePath, maxBuffer: 4 * 1024 * 1024 });
-    const { stdout: full } = await execAsync("git diff --cached", { cwd: workspacePath, maxBuffer: 16 * 1024 * 1024 });
+    const { stdout: stat } = await git(["diff", "--cached", "--stat"], { cwd: workspacePath, maxBuffer: 4 * 1024 * 1024 });
+    const { stdout: full } = await git(["diff", "--cached"], { cwd: workspacePath, maxBuffer: 16 * 1024 * 1024 });
     statText = stat.trim();
     diffText = `${statText}\n\n${full}`;
   } catch (err) {
@@ -2910,23 +2915,27 @@ async function generateCommitMessage(workspacePath: string, userPrompt: string):
 async function tagAppVersion(workspacePath: string, version: string): Promise<void> {
   const tag = `v${version}`;
   try {
-    const { stdout: existing } = await execAsync(`git tag -l ${tag}`, { cwd: workspacePath });
-    if (existing.trim()) {
+    // `tag` derives from the generated app's package.json version, which the
+    // agent can write — as an unquoted shell interpolation this was an injection
+    // path. rev-parse also beats `tag -l`, whose argument is a glob: a version
+    // containing `*` or `?` would have matched unrelated tags.
+    const existing = await tryGit(["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { cwd: workspacePath });
+    if (existing.code === 0) {
       // Tag already exists locally (e.g. created earlier while no remote was
       // configured). Don't recreate it — but still fall through to the push so
       // the remote catches up.
       console.log(`[autoTag] Tag ${tag} already exists locally`);
     } else {
-      await execAsync(`git tag ${tag}`, { cwd: workspacePath });
+      await git(["tag", tag], { cwd: workspacePath });
       console.log(`[autoTag] Tagged ${tag}`);
     }
     // Always attempt to push the tag when a remote exists. Pushing a tag that is
     // already on the remote is a harmless no-op; this guarantees the version tag
     // reaches origin even if it was created earlier while offline.
     try {
-      const { stdout: remoteUrl } = await execAsync("git remote get-url origin", { cwd: workspacePath });
+      const { stdout: remoteUrl } = await git(["remote", "get-url", "origin"], { cwd: workspacePath });
       if (remoteUrl.trim()) {
-        await execAsync(`git push origin ${tag}`, { cwd: workspacePath });
+        await git(["push", "origin", tag], { cwd: workspacePath });
         console.log(`[autoTag] Pushed tag ${tag}`);
       }
     } catch {
@@ -2940,8 +2949,8 @@ async function tagAppVersion(workspacePath: string, version: string): Promise<vo
 async function autoCommitWithGeneratedMessage(workspacePath: string, userPrompt: string): Promise<void> {
   return withGitLock(workspacePath, async () => {
     try {
-      await execAsync("git add -A", { cwd: workspacePath });
-      const { stdout } = await execAsync("git status --porcelain", { cwd: workspacePath });
+      await git(["add", "-A"], { cwd: workspacePath });
+      const { stdout } = await git(["status", "--porcelain"], { cwd: workspacePath });
       if (!stdout.trim()) {
         console.log("[autoCommit] No changes to commit");
         return;
@@ -2956,7 +2965,7 @@ async function autoCommitWithGeneratedMessage(workspacePath: string, userPrompt:
         if (current) {
           bumpedVersion = bumpBuild(current);
           await writeAppVersion(workspacePath, bumpedVersion);
-          await execAsync("git add package.json", { cwd: workspacePath });
+          await git(["add", "package.json"], { cwd: workspacePath });
           console.log(`[autoCommit] Bumped build version ${current} -> ${bumpedVersion}`);
         }
       } catch (err) {
@@ -2981,9 +2990,9 @@ async function autoCommitWithGeneratedMessage(workspacePath: string, userPrompt:
       console.log(`[autoCommit] Committed: ${finalSubject}`);
 
       try {
-        const { stdout: remoteUrl } = await execAsync("git remote get-url origin", { cwd: workspacePath });
+        const { stdout: remoteUrl } = await git(["remote", "get-url", "origin"], { cwd: workspacePath });
         if (remoteUrl.trim()) {
-          await execAsync("git push -u origin HEAD", { cwd: workspacePath });
+          await git(["push", "-u", "origin", "HEAD"], { cwd: workspacePath });
           console.log("[autoCommit] Pushed to remote");
         }
       } catch {
@@ -3249,9 +3258,9 @@ export async function initializeProject(
     sendProjectStep(userId, projectId, "create_workspace", "in-progress");
     await fs.mkdir(workspacePath, { recursive: true });
     sendProjectLog(userId, projectId, "create_workspace", "Created workspace directory");
-    await execAsync("git init", { cwd: workspacePath });
-    await execAsync('git config user.email "vca@local"', { cwd: workspacePath });
-    await execAsync('git config user.name "VCA"', { cwd: workspacePath });
+    await git(["init"], { cwd: workspacePath });
+    await git(["config", "user.email", "vca@local"], { cwd: workspacePath });
+    await git(["config", "user.name", "VCA"], { cwd: workspacePath });
     sendProjectLog(userId, projectId, "create_workspace", "Initialized git repository");
     sendProjectStep(userId, projectId, "create_workspace", "finished");
 
@@ -3321,8 +3330,8 @@ export async function initializeProject(
       deploymentOption: presetOption,
     });
     await ensureProjectGitignore(workspacePath);
-    await execAsync("git add -A", { cwd: workspacePath });
-    await execAsync('git commit -m "Initial template"', { cwd: workspacePath });
+    await git(["add", "-A"], { cwd: workspacePath });
+    await git(["commit", "-m", "Initial template"], { cwd: workspacePath });
     sendProjectLog(userId, projectId, "initial_commit", "Created initial commit");
     sendProjectStep(userId, projectId, "initial_commit", "finished");
 
@@ -4067,18 +4076,18 @@ export async function setAppMainMinor(
     // Throws (ENOENT) if the app has no package.json — surfaced to the caller.
     await writeAppVersion(workspacePath, newVersion);
     try {
-      await execAsync("git add package.json", { cwd: workspacePath });
-      const { stdout } = await execAsync("git status --porcelain -- package.json", { cwd: workspacePath });
+      await git(["add", "package.json"], { cwd: workspacePath });
+      const { stdout } = await git(["status", "--porcelain", "--", "package.json"], { cwd: workspacePath });
       // `-- package.json` isolates the commit to just this file even if the
       // working tree has other in-progress changes staged.
       if (stdout.trim()) {
-        await execAsync(`git commit -m "Set version to ${newVersion}" -- package.json`, { cwd: workspacePath });
+        await git(["commit", "-m", `Set version to ${newVersion}`, "--", "package.json"], { cwd: workspacePath });
         // Push the version commit + tag it (vX.Y.Z), mirroring the agent commit
         // path so the branch and tag stay consistent on the remote.
         try {
-          const { stdout: remoteUrl } = await execAsync("git remote get-url origin", { cwd: workspacePath });
+          const { stdout: remoteUrl } = await git(["remote", "get-url", "origin"], { cwd: workspacePath });
           if (remoteUrl.trim()) {
-            await execAsync("git push -u origin HEAD", { cwd: workspacePath });
+            await git(["push", "-u", "origin", "HEAD"], { cwd: workspacePath });
           }
         } catch {
           // No remote configured, skip push
@@ -5019,6 +5028,29 @@ export async function sendPrompt(userId: string, projectId: string, chatId: stri
     return;
   }
 
+  // The claim above only covers this process. When WORKSPACES_ROOT is on a
+  // fileserver or a synced folder, a colleague's VCA resolves to the very same
+  // workspace directory, and nothing downstream (git, chat JSONL, projects.json)
+  // survives two agents writing at once. Take the cross-machine lease too, and
+  // give the slot straight back if someone else holds it.
+  if (await leasingEnabled()) {
+    const workspacePath = await getWorkspacePath(userId, projectId);
+    const lease = await acquireLease(workspacePath, describeSelf(userId));
+    if (!lease.ok) {
+      releaseProjectPromptSlot(userId, projectId, chatId);
+      const who = lease.holder ? `${lease.holder.user} (${lease.holder.machine})` : "another VCA instance";
+      const existing = sessions.get(makeSessionKey(userId, projectId, chatId));
+      if (existing) {
+        sendSSEEvent(existing, "error", {
+          message: `This project is currently open by ${who}. Only one person can work on a project at a time.`,
+          status: "PROJECT_LOCKED",
+          holder: lease.holder,
+        });
+      }
+      return;
+    }
+  }
+
   // Notify every chat in the project (including viewing-only chats whose
   // SSE clients are still pending) that the slot is now held — fire before
   // the slow getOrCreateSession await so other tabs disable submit during
@@ -5222,9 +5254,14 @@ export async function sendPrompt(userId: string, projectId: string, chatId: stri
     }
     releaseProjectPromptSlot(userId, projectId, chatId);
     // Only broadcast the release once the slot is actually free (refcount 0
-    // for same-chat re-entry).
+    // for same-chat re-entry). The cross-machine lease follows the same rule —
+    // a followUp prompt re-enters with the slot still held, and dropping the
+    // lease there would let a peer in mid-turn.
     if (getProjectActiveChatId(userId, projectId) === null) {
       broadcastSSEEvent(userId, projectId, "project_lock_released", { chatId });
+      try {
+        await releaseLease(await getWorkspacePath(userId, projectId));
+      } catch { /* never let lease cleanup mask the turn's own outcome */ }
     }
   }
 }
@@ -5397,20 +5434,30 @@ export async function resetUserSessions(userId: string): Promise<void> {
   }
 }
 
+// Commit hashes arrive from API callers. Passing a real argv already removes the
+// shell, but git itself still reads a leading "-" as an option — and on some
+// subcommands `--upload-pack=<cmd>` executes it. Validate the shape first.
+const COMMIT_HASH_RE = /^[0-9a-fA-F]{7,40}$/;
+
+function checkedCommitHash(hash: string): string {
+  if (!COMMIT_HASH_RE.test(hash)) throw new Error(`Invalid commit hash: ${hash}`);
+  return hash;
+}
+
 export async function rollback(userId: string, projectId: string, chatId: string, commitHash?: string): Promise<number> {
   const workspacePath = await getWorkspacePath(userId, projectId);
   return withGitLock(workspacePath, async () => {
     if (commitHash) {
-      await execAsync(`git reset --hard ${commitHash}`, { cwd: workspacePath });
+      await git(["reset", "--hard", checkedCommitHash(commitHash)], { cwd: workspacePath });
     } else {
-      await execAsync("git reset --hard HEAD~1", { cwd: workspacePath });
+      await git(["reset", "--hard", "HEAD~1"], { cwd: workspacePath });
     }
 
     // Force-push to remote if configured
     try {
-      const { stdout } = await execAsync("git remote get-url origin", { cwd: workspacePath });
+      const { stdout } = await git(["remote", "get-url", "origin"], { cwd: workspacePath });
       if (stdout.trim()) {
-        await execAsync("git push --force origin HEAD", { cwd: workspacePath });
+        await git(["push", "--force", "origin", "HEAD"], { cwd: workspacePath });
         console.log("[rollback] Force-pushed to remote");
       }
     } catch {
@@ -5420,7 +5467,7 @@ export async function rollback(userId: string, projectId: string, chatId: string
     // Count remaining commits (excluding "Initial commit") to determine conversation turns
     let turnCount = 0;
     try {
-      const { stdout } = await execAsync('git log --oneline', { cwd: workspacePath });
+      const { stdout } = await git(["log", "--oneline"], { cwd: workspacePath });
       const lines = stdout.trim().split("\n").filter(l => l.trim());
       // Each non-initial commit corresponds to one conversation turn
       turnCount = lines.filter(l => !l.includes("Initial commit")).length;
@@ -5473,8 +5520,8 @@ export async function getCommits(userId: string, projectId: string): Promise<{ c
   try {
     // %D carries the ref decoration (branches + tags) for each commit; we parse
     // out the `tag: <name>` entries so the UI can show a commit's version tag.
-    const { stdout } = await execAsync(
-      'git log --all --format="%H%x1f%B%x1f%aI%x1f%D%x1e" --max-count=50',
+    const { stdout } = await git(
+      ["log", "--all", "--format=%H%x1f%B%x1f%aI%x1f%D%x1e", "--max-count=50"],
       { cwd: workspacePath, maxBuffer: 10 * 1024 * 1024 }
     );
     const commits = stdout.split("\x1e").map(s => s.trim()).filter(Boolean).map(record => {
@@ -5487,7 +5534,7 @@ export async function getCommits(userId: string, projectId: string): Promise<{ c
         .filter(Boolean);
       return { hash, message: (message || "").trim(), date, tags };
     });
-    const { stdout: headOut } = await execAsync('git rev-parse HEAD', { cwd: workspacePath });
+    const { stdout: headOut } = await git(["rev-parse", "HEAD"], { cwd: workspacePath });
     const headHash = headOut.trim();
     const latestHash = commits.length > 0 ? commits[0].hash : headHash;
     return { commits, headHash, latestHash };
@@ -5500,7 +5547,7 @@ export async function checkoutCommit(userId: string, projectId: string, commitHa
   const workspacePath = await getWorkspacePath(userId, projectId);
   const key = makeProjectKey(userId, projectId);
   await withGitLock(workspacePath, async () => {
-    await execAsync(`git checkout ${commitHash}`, { cwd: workspacePath });
+    await git(["checkout", checkedCommitHash(commitHash)], { cwd: workspacePath });
   });
   // Restart app process so preview reflects the checked-out state
   await stopAppProcess(key);
@@ -5513,15 +5560,15 @@ export async function checkoutLatest(userId: string, projectId: string): Promise
   await withGitLock(workspacePath, async () => {
     // Get the default branch name (usually main or master)
     try {
-      const { stdout } = await execAsync('git symbolic-ref refs/remotes/origin/HEAD', { cwd: workspacePath });
+      const { stdout } = await git(["symbolic-ref", "refs/remotes/origin/HEAD"], { cwd: workspacePath });
       const branch = stdout.trim().replace("refs/remotes/origin/", "");
-      await execAsync(`git checkout ${branch}`, { cwd: workspacePath });
+      await git(["checkout", branch], { cwd: workspacePath });
     } catch {
       // No remote HEAD, try main then master
       try {
-        await execAsync('git checkout main', { cwd: workspacePath });
+        await git(["checkout", "main"], { cwd: workspacePath });
       } catch {
-        await execAsync('git checkout master', { cwd: workspacePath });
+        await git(["checkout", "master"], { cwd: workspacePath });
       }
     }
   });
@@ -6353,7 +6400,7 @@ export async function clearChatMessages(userId: string, projectId: string, chatI
 export async function hasGitRemote(userId: string, projectId: string): Promise<boolean> {
   const workspacePath = await getWorkspacePath(userId, projectId);
   try {
-    const { stdout } = await execAsync("git remote get-url origin", { cwd: workspacePath });
+    const { stdout } = await git(["remote", "get-url", "origin"], { cwd: workspacePath });
     return !!stdout.trim();
   } catch {
     return false;
@@ -6363,7 +6410,7 @@ export async function hasGitRemote(userId: string, projectId: string): Promise<b
 export async function getGitRemote(userId: string, projectId: string): Promise<{ remoteUrl: string } | null> {
   const workspacePath = await getWorkspacePath(userId, projectId);
   try {
-    const { stdout } = await execAsync("git remote get-url origin", { cwd: workspacePath });
+    const { stdout } = await git(["remote", "get-url", "origin"], { cwd: workspacePath });
     const url = stdout.trim();
     if (!url) return null;
     // Strip any embedded credentials (https://user:pat@host → https://host).
@@ -6545,8 +6592,10 @@ export async function connectRemote(userId: string, projectId: string): Promise<
 export async function gitPush(userId: string, projectId: string, force?: boolean): Promise<string> {
   const workspacePath = await getWorkspacePath(userId, projectId);
   return withGitLock(workspacePath, async () => {
-    const cmd = force ? "git push --force -u origin HEAD" : "git push -u origin HEAD";
-    const { stdout, stderr } = await execAsync(cmd, { cwd: workspacePath });
+    const args = force
+      ? ["push", "--force", "-u", "origin", "HEAD"]
+      : ["push", "-u", "origin", "HEAD"];
+    const { stdout, stderr } = await git(args, { cwd: workspacePath });
     return stdout + stderr;
   });
 }
@@ -6556,12 +6605,12 @@ export async function gitPull(userId: string, projectId: string, force?: boolean
   return withGitLock(workspacePath, async () => {
     // Always clean untracked files and reset tracked changes before pull
     // to avoid conflicts with files from the remote (e.g. .gitignore)
-    await execAsync("git clean -fd", { cwd: workspacePath }).catch(() => {});
-    await execAsync("git checkout -- .", { cwd: workspacePath }).catch(() => {});
+    await git(["clean", "-fd"], { cwd: workspacePath }).catch(() => {});
+    await git(["checkout", "--", "."], { cwd: workspacePath }).catch(() => {});
     if (force) {
-      await execAsync("git reset --hard HEAD", { cwd: workspacePath }).catch(() => {});
+      await git(["reset", "--hard", "HEAD"], { cwd: workspacePath }).catch(() => {});
     }
-    const { stdout, stderr } = await execAsync("git pull origin HEAD --no-rebase --allow-unrelated-histories", { cwd: workspacePath });
+    const { stdout, stderr } = await git(["pull", "origin", "HEAD", "--no-rebase", "--allow-unrelated-histories"], { cwd: workspacePath });
     return stdout + stderr;
   });
 }

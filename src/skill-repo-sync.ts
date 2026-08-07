@@ -1,12 +1,9 @@
 import fs from "fs/promises";
 import path from "path";
-import { exec } from "child_process";
-import { promisify } from "util";
-import { findLatestVersionTag, tagToVersion } from "./git-tag-utils.js";
+import { findLatestVersionTag, tagToVersion, buildAuthUrl } from "./git-tag-utils.js";
+import { git, tryGit, secretsInUrl } from "./exec-utils.js";
 import { withGitLock } from "./git-lock.js";
 import { systemPaths } from "./paths.js";
-
-const execAsync = promisify(exec);
 
 const SYSTEM_DIR = systemPaths.dir();
 const CACHE_DIR = systemPaths.skillRepoCache();
@@ -30,26 +27,21 @@ export function repoToSkillName(url: string): string {
   return last.replace(/\.git$/, "");
 }
 
-/**
- * Build authenticated URL by embedding PAT before the host.
- */
-export function buildAuthUrl(url: string, pat: string): string {
-  return url.replace("https://", `https://${pat}@`);
-}
+// Re-exported for skill-install.ts. The implementation moved to git-tag-utils so
+// this module and system-prompt-sync stop carrying separate copies — the old
+// local one did a naive `url.replace("https://", …)` with no percent-encoding,
+// which corrupted the URL for any PAT containing `@`, `:`, `/` or `#`.
+export { buildAuthUrl };
 
 /**
  * Get the current checked-out tag in a repo directory.
  */
 async function getCurrentTag(repoDir: string): Promise<string | null> {
-  try {
-    const { stdout } = await execAsync("git describe --tags --exact-match HEAD", {
-      cwd: repoDir,
-      timeout: 5000,
-    });
-    return stdout.trim() || null;
-  } catch {
-    return null;
-  }
+  const res = await tryGit(["describe", "--tags", "--exact-match", "HEAD"], {
+    cwd: repoDir,
+    timeout: 5000,
+  });
+  return res.code === 0 ? res.stdout.trim() || null : null;
 }
 
 /**
@@ -95,9 +87,9 @@ async function cloneAtTag(
   try {
     console.log(`[skill-sync] ${skillName}: cloning at ${latestTag}...`);
     await fs.rm(repoDir, { recursive: true, force: true });
-    await execAsync(
-      `git clone --depth 1 --branch ${latestTag} "${authUrl}" "${repoDir}"`,
-      { cwd: cacheDir, timeout: 30000 },
+    await git(
+      ["clone", "--depth", "1", "--branch", latestTag, "--", authUrl, repoDir],
+      { cwd: cacheDir, timeout: 30000, redact: secretsInUrl(authUrl) },
     );
     console.log(`[skill-sync] ${skillName}: cloned at ${latestTag}`);
     return { ok: true, tag: latestTag };
