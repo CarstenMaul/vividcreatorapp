@@ -23,6 +23,13 @@ contextBridge.exposeInMainWorld("vcaDesktop", {
   /** Open a project's userdata/ folder in the OS file explorer. */
   openUserdataFolder: (arg: { userId: string; projectId: string }) =>
     ipcRenderer.invoke("vca:openUserdataFolder", arg),
+  /**
+   * One-way push: tells the main process whether an agent turn is in flight, so
+   * win.on("close") and before-quit can refuse to tear down the in-process
+   * server mid-turn. Carries the localized notice text — main has no i18n.
+   */
+  setAgentBusy: (arg: { busy: boolean; title?: string; message?: string }) =>
+    ipcRenderer.send("vca:setAgentBusy", arg),
 });
 
 export {};

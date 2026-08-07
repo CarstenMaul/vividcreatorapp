@@ -909,7 +909,11 @@ html, body {
   gap: 6px;
 }
 .row-menu button:hover { background: var(--bg-tertiary); }
-.row-menu button:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Radix DropdownMenu.Item forwards its disabled state as data-disabled, not the
+   native attribute, so match both. */
+.row-menu button:disabled,
+.row-menu button[data-disabled] { opacity: 0.4; cursor: not-allowed; }
+.row-menu button[data-disabled]:hover { background: none; }
 .row-menu button.danger { color: var(--error); }
 
 /* ─── Chat summary row ─────────────────────────────────────── */
@@ -982,6 +986,16 @@ html, body {
   color: var(--text-primary);
   border-color: var(--accent);
   background: var(--bg-tertiary);
+}
+
+/* aria-disabled (not :disabled) so the button still receives hover and can
+   open its tooltip explaining why it's blocked. */
+.icon-btn-sm[aria-disabled="true"] { opacity: 0.4; cursor: not-allowed; }
+
+.icon-btn-sm[aria-disabled="true"]:hover {
+  color: var(--text-secondary);
+  border-color: var(--border);
+  background: none;
 }
 
 .icon-btn-sm.deployed {
@@ -4320,6 +4334,11 @@ select.modal-input { appearance: auto; cursor: pointer; }
   font-weight: 400;
 }
 .project-row:hover { background: var(--bg-tertiary); }
+
+/* Set while an agent turn is running in another project — switching would
+   abandon it. The row keeps its click handler; handleSelect no-ops. */
+.project-row[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+.project-row[aria-disabled="true"]:hover { background: none; }
 .project-row.active {
   background: color-mix(in srgb, var(--accent) 10%, transparent);
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);

@@ -85,15 +85,61 @@ border:1px solid #3a4252;border-radius:6px;padding:12px;font-size:12px;line-heig
 
 let win: BrowserWindow | null = null;
 
+// Whether an agent turn is in flight in the renderer's open project, pushed over
+// vca:setAgentBusy. Closing the window mid-turn would kill the server that is
+// running it, so the close and quit paths refuse while this is set. The renderer
+// also carries the localized notice text — the main process has no i18n.
+let agentBusy = false;
+let agentBusyText: { title: string; message: string } | null = null;
+
+const AGENT_BUSY_FALLBACK = {
+  title: "The agent is still working",
+  message: "VCA is running an agent task. Press Stop in the chat input, then close the window.",
+};
+
+// Repeated Alt+F4 / Cmd+Q would otherwise stack one box per attempt.
+let agentBusyNoticeOpen = false;
+
+function showAgentBusyNotice(w: BrowserWindow): void {
+  if (agentBusyNoticeOpen) return;
+  agentBusyNoticeOpen = true;
+  const txt = agentBusyText ?? AGENT_BUSY_FALLBACK;
+  // Deliberately a one-button notice, not a confirm: the in-app close button is
+  // greyed out for the same reason, and Stop in the chat input is the way out.
+  void dialog
+    .showMessageBox(w, {
+      type: "info",
+      buttons: ["OK"],
+      defaultId: 0,
+      noLink: true,
+      title: "VCA",
+      message: txt.title,
+      detail: txt.message,
+    })
+    .finally(() => {
+      agentBusyNoticeOpen = false;
+    });
+}
+
 function attachDiagnostics(w: BrowserWindow): void {
   const wc = w.webContents;
   wc.on("did-finish-load", () => log(`did-finish-load: ${wc.getURL()}`));
   wc.on("did-fail-load", (_e, code, desc, url, isMainFrame) =>
     log(`did-fail-load: ${code} ${desc} url=${url} mainFrame=${isMainFrame}`),
   );
-  wc.on("render-process-gone", (_e, details) =>
-    log(`render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`),
-  );
+  wc.on("render-process-gone", (_e, details) => {
+    // A dead renderer can never push busy=false, which would wedge the window
+    // permanently shut. Same for a reload — the renderer re-pushes within a
+    // second of reconnecting its SSE stream.
+    agentBusy = false;
+    log(`render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`);
+  });
+  // Electron 42 delivers a single details object here (same style as
+  // console-message above). Must be main-frame only: the preview iframe
+  // navigates constantly and must not clear the flag.
+  wc.on("did-start-navigation", (e: any) => {
+    if (e?.isMainFrame === true && e?.isSameDocument !== true) agentBusy = false;
+  });
   wc.on("preload-error", (_e, preloadPath, error) =>
     log(`preload-error: ${preloadPath} ${error?.stack || error}`),
   );
@@ -273,6 +319,20 @@ function registerStorageIpc(w: BrowserWindow, defaultRoot: string): void {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
+
+  // One-way push from the renderer whenever an agent turn starts or ends, with
+  // the localized notice text. Fire-and-forget (send/on, not invoke/handle) —
+  // the window-close guard reads the cached value synchronously.
+  ipcMain.on("vca:setAgentBusy", (_e, arg: unknown) => {
+    const a = (arg ?? {}) as { busy?: unknown; title?: unknown; message?: unknown };
+    agentBusy = a.busy === true;
+    agentBusyText = agentBusy
+      ? {
+          title: typeof a.title === "string" && a.title ? a.title : AGENT_BUSY_FALLBACK.title,
+          message: typeof a.message === "string" && a.message ? a.message : AGENT_BUSY_FALLBACK.message,
+        }
+      : null;
+  });
 }
 
 async function bootstrap(): Promise<void> {
@@ -298,6 +358,16 @@ async function bootstrap(): Promise<void> {
   });
   win = w;
   attachDiagnostics(w);
+
+  // Closing the window shuts down the in-process server that is running the
+  // agent, so refuse while a turn is in flight. The OS title-bar ✕ can't be
+  // greyed out like the in-app close button, so the same message is delivered
+  // as a native notice instead.
+  w.on("close", (e) => {
+    if (!agentBusy) return;
+    e.preventDefault();
+    showAgentBusyNotice(w);
+  });
 
   // getDisplayMedia() is rejected in Electron unless the app supplies a capture
   // source via this handler. Serving the requesting frame reproduces Chrome's
@@ -439,6 +509,15 @@ process.on("unhandledRejection", (err) => log(`main unhandledRejection: ${err}`)
 let shuttingDown = false;
 app.on("before-quit", (event) => {
   if (shuttingDown) return;
+  // Cmd+Q / app.quit() bypass win.on("close") entirely, so the same guard has
+  // to sit here too — otherwise quitting kills the agent mid-turn.
+  if (agentBusy && win && !win.isDestroyed()) {
+    event.preventDefault();
+    win.show();
+    win.focus();
+    showAgentBusyNotice(win);
+    return;
+  }
   event.preventDefault();
   shuttingDown = true;
 

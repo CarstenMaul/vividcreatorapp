@@ -684,6 +684,25 @@ const EMPTY_PREVIEW_STATE = {
   lastUsedAt: null,
 };
 
+// True while an agent turn is in flight anywhere in the OPEN project. Every path
+// that leaves a project gates on this: closing/switching/deleting releases the
+// server lock without aborting the agent, so the turn would keep writing files
+// into a workspace another user can now grab.
+//
+// projectActiveChatId is the authoritative half — the server holds the project
+// prompt slot for the whole of sendPrompt (compaction, retries, and the post-turn
+// auto-commit / diagram sync / preview restart), and it is broadcast to every chat
+// tab, so it also covers turns running in a background chat where isStreaming is
+// false. isStreaming is kept as the faster-arriving signal; it over-reports rather
+// than under-reports, since agent_end is skipped during compaction/retry.
+//
+// Scoped on currentProjectId deliberately: without it a stale flag left over from
+// a takeover would read busy with no project open and lock the user out of the
+// gallery. CLEAR_PROJECT also resets both flags for the same reason.
+function isAgentBusy(state) {
+  return !!state?.currentProjectId && (!!state.isStreaming || !!state.projectActiveChatId);
+}
+
 // Check if a tool call targets an internal .vca-* file (diagrams, metadata)
 function isSkillInvocation(tc) {
   const p = tc.args?.file_path || tc.args?.path || "";
@@ -1038,7 +1057,10 @@ function reducer(state, action) {
       return next;
     }
     case "CLEAR_PROJECT":
-      return { ...state, currentProjectId: null, currentProjectName: "", messages: [], chats: [], currentChatId: null, projectLockState: "idle", projectLockProjectId: null, pendingProjectSelection: null, previousProjectSelection: null };
+      // Reset the busy flags too: nothing else clears them once the project is
+      // gone (a takeover can land mid-turn), and a stale one would make
+      // isAgentBusy read true forever and block opening any project.
+      return { ...state, currentProjectId: null, currentProjectName: "", messages: [], chats: [], currentChatId: null, isStreaming: false, projectActiveChatId: null, projectLockState: "idle", projectLockProjectId: null, pendingProjectSelection: null, previousProjectSelection: null };
     case "SET_CHATS":
       return { ...state, chats: action.chats };
     case "ADD_CHAT":
@@ -6957,7 +6979,7 @@ function CostListDialog({ open, onOpenChange, projectId, projectName, userId, t,
 }
 
 function ChatSection() {
-  const { state, userId, isAdmin, loadProjects, setShowCommits, setShowGit, setShowDeploy, gitRemoteConfigured, userdataNotesRef, devFocus, setDevFocus, closeProject, captureScreenshotRef, pendingScreenshot, clearPendingScreenshot, t, lang } = useContext(AppContext);
+  const { state, agentBusy, userId, isAdmin, loadProjects, setShowCommits, setShowGit, setShowDeploy, gitRemoteConfigured, userdataNotesRef, devFocus, setDevFocus, closeProject, captureScreenshotRef, pendingScreenshot, clearPendingScreenshot, t, lang } = useContext(AppContext);
   const [showChatSkills, setShowChatSkills] = useState(false);
   const [showUserData, setShowUserData] = useState(false);
   const [showProjectSettings, setShowProjectSettings] = useState(false);
@@ -7127,8 +7149,17 @@ function ChatSection() {
           </Tip>
         </div>
         <span className="chat-header-title" />
-        <Tip label={t("sidebar.closeProject")} side="bottom">
-          <button className="icon-btn-sm" onClick={closeProject}>
+        {/* Closing mid-turn would release the project lock while the agent keeps
+            writing, so block it. aria-disabled rather than disabled: a disabled
+            button gets no pointer events, so the Tip explaining WHY would never
+            open — which makes the onClick guard the thing that actually blocks
+            (it covers Enter/Space too). */}
+        <Tip label={agentBusy ? t("sidebar.closeProjectBusy") : t("sidebar.closeProject")} side="bottom">
+          <button
+            className="icon-btn-sm"
+            aria-disabled={agentBusy || undefined}
+            onClick={() => { if (!agentBusy) closeProject(); }}
+          >
             <X size={13} />
           </button>
         </Tip>
@@ -7304,7 +7335,7 @@ const THINKING_LEVELS = [
 ];
 
 function ThinkingEffortDropdown({ openUpward = false }) {
-  const { state, thinkingLevel, setThinkingLevel, sessionConfig, setSessionConfig, userId, serverConfig, t } = useContext(AppContext);
+  const { agentBusy, thinkingLevel, setThinkingLevel, sessionConfig, setSessionConfig, userId, serverConfig, t } = useContext(AppContext);
   const [open, setOpen] = useState(false);
   const ref = useRef(null);
   // Show what THIS chat's session is actually running: the agent may have
@@ -7321,9 +7352,8 @@ function ThinkingEffortDropdown({ openUpward = false }) {
   const activeModelId = (switched && sessionConfig?.modelId) || serverConfig?.llm?.modelId || "";
   const TriggerIcon = current.Icon;
   // Changing the level calls reset-sessions, which would kill the in-flight
-  // agent run. Lock the picker while any chat in the project is processing —
-  // the viewed chat (isStreaming) or a background chat tab (projectActiveChatId).
-  const locked = !!state?.isStreaming || !!state?.projectActiveChatId;
+  // agent run. Lock the picker while any chat in the project is processing.
+  const locked = agentBusy;
 
   useEffect(() => {
     if (!open) return;
@@ -7405,7 +7435,7 @@ function notifyLlmProfilesChanged() {
 // model is live. Admin-only and hidden when the LLM is env-configured; switching
 // is blocked while the agent is processing (mirrors the effort control).
 function ProfileSwitcherDropdown() {
-  const { state, userId, isAdmin, serverManaged, serverConfig, sessionConfig, setSessionConfig, reloadServerConfig, selectProject, closeProject, t } = useContext(AppContext);
+  const { state, agentBusy, userId, isAdmin, serverManaged, serverConfig, sessionConfig, setSessionConfig, reloadServerConfig, selectProject, closeProject, t } = useContext(AppContext);
   const [open, setOpen] = useState(false);
   const [profiles, setProfiles] = useState([]);
   const [activeProfileId, setActiveProfileId] = useState("");
@@ -7414,9 +7444,8 @@ function ProfileSwitcherDropdown() {
   const ref = useRef(null);
 
   const enabled = isAdmin && !serverManaged;
-  // Block switching while any chat in the project is processing — the viewed
-  // chat (isStreaming) or a background chat tab (projectActiveChatId).
-  const locked = !!state?.isStreaming || !!state?.projectActiveChatId;
+  // Block switching while any chat in the project is processing.
+  const locked = agentBusy;
 
   const loadProfiles = useCallback(() => {
     if (!enabled) return;
@@ -11975,7 +12004,7 @@ function NewProjectDialog({ open, onOpenChange }) {
 }
 
 function ProjectsGalleryDialog({ open, onOpenChange }) {
-  const { state, userId, loadProjects, selectProject, deleteProject, unlinkProject, setShowNewProject, isAdmin, lang, t } = useContext(AppContext);
+  const { state, agentBusy, userId, loadProjects, selectProject, deleteProject, unlinkProject, setShowNewProject, isAdmin, lang, t } = useContext(AppContext);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [showLinkOthers, setShowLinkOthers] = useState(false);
   const [confirmUnlink, setConfirmUnlink] = useState(null); // { id, name, ownerName } or null
@@ -12242,6 +12271,13 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
   const confirmProject = state.projects.find(p => p.id === confirmDelete);
 
   const handleSelect = (id, name) => {
+    // Switching away mid-turn releases the running project's lock while the
+    // agent keeps writing. Re-picking the already-open project isn't a switch,
+    // but selectProject would still wipe messages/chats — just close instead.
+    if (agentBusy) {
+      if (id === state.currentProjectId) onOpenChange(false);
+      return;
+    }
     selectProject(id, name);
     onOpenChange(false);
   };
@@ -12252,6 +12288,8 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
   };
 
   const handleCreateNew = () => {
+    // Creating a project switches away from the current one (releasing its lock).
+    if (agentBusy) return;
     onOpenChange(false);
     setTimeout(() => setShowNewProject(true), 150);
   };
@@ -12262,6 +12300,11 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
     const deployedUrl = p.deployment?.deployed ? p.deployment.url : null;
     // Drag to re-file is disabled in the flat search view (no folder tree shown).
     const dndEnabled = !searchQuery.trim();
+    // Mid-turn: every other project is unreachable (switching would abandon the
+    // running one), and the active one can't be deleted or unlinked. Dragging
+    // stays live — folder moves are per-user metadata and touch no workspace.
+    const rowBlocked = agentBusy && !isActive;
+    const activeBlocked = agentBusy && isActive;
 
     const kebabItems = [
       deployedUrl && {
@@ -12289,6 +12332,7 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
         icon: <Trash2 size={14} />,
         label: t("project.deleteTitle"),
         danger: true,
+        disabled: activeBlocked,
         onClick: () => {
           setConfirmDelete(p.id);
         },
@@ -12299,6 +12343,8 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
       <div
         key={p.id}
         className={`project-row${isActive ? " active" : ""}${isLinked ? " linked" : ""}`}
+        aria-disabled={rowBlocked || undefined}
+        title={rowBlocked ? t("project.busyBlocked") : undefined}
         style={depth > 0 ? { marginLeft: depth * 18 } : undefined}
         draggable={dndEnabled}
         onMouseDown={dndEnabled ? () => { dragMovedRef.current = false; } : undefined}
@@ -12349,7 +12395,7 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
               className="project-badge linked"
               title={p.sourceDisplayName || t("project.linked")}
               onClick={() => setConfirmUnlink({ id: p.id, name: p.name, ownerName: p.sourceDisplayName || "" })}
-              disabled={!!linkBusy[p.id]}
+              disabled={!!linkBusy[p.id] || activeBlocked}
             >
               <Link2 size={11} />
             </button>
@@ -12482,7 +12528,7 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
-            <button className="btn-primary" onClick={handleCreateNew}>
+            <button className="btn-primary" onClick={handleCreateNew} disabled={agentBusy}>
               <Plus size={14} /> {t("projectsGallery.createNew")}
             </button>
             <Tip label={t("projectFolders.new")} side="bottom">
@@ -12507,6 +12553,14 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
             )}
           </div>
 
+          {/* Everything that would abandon the running project is disabled below;
+              this says why, once, instead of on every greyed-out control. */}
+          {agentBusy && (
+            <div className="settings-readonly-banner">
+              {t("projectsGallery.agentBusy", { name: state.currentProjectName })}
+            </div>
+          )}
+
           <div className="gallery-body">
             {searchQuery.trim() ? (
               // Search ignores the folder tree — matches shown flat.
@@ -12524,7 +12578,7 @@ function ProjectsGalleryDialog({ open, onOpenChange }) {
               <div className="project-list-empty">
                 <FolderOpen size={28} />
                 <span>{t("projectsGallery.empty")}</span>
-                <button className="btn-primary" onClick={handleCreateNew}>
+                <button className="btn-primary" onClick={handleCreateNew} disabled={agentBusy}>
                   <Plus size={14} /> {t("projectsGallery.createNew")}
                 </button>
               </div>
@@ -17159,6 +17213,10 @@ export function App() {
   // then the server-side cross-user acquire, then loads the project.
   const selectProject = useCallback(async (id, name) => {
     if (!id) return;
+    // Switching away from a running agent releases its lock without stopping it.
+    // Silent no-op, not a throw: ProfileSwitcherDropdown chains this after
+    // closeProject and the UI already disables every affordance that gets here.
+    if (isAgentBusy(state) && id !== state.currentProjectId) return;
     const prevId = state.currentProjectId;
     const result = await requestAcquire(id);
     if (result?.cancelled) return; // superseded by another acquire
@@ -17177,7 +17235,7 @@ export function App() {
       releaseServerLock(prevId);
     }
     await performSelectProject(id, name);
-  }, [state.currentProjectId, requestAcquire, releaseLock, acquireServerLock, releaseServerLock, performSelectProject]);
+  }, [state.currentProjectId, state.isStreaming, state.projectActiveChatId, requestAcquire, releaseLock, acquireServerLock, releaseServerLock, performSelectProject]);
 
   // User clicked "Open here" in the conflict modal — force the takeover and
   // proceed with the project switch.
@@ -17272,6 +17330,8 @@ export function App() {
   // Delete project
   const deleteProject = useCallback(async (id, alsoUndeploy) => {
     void alsoUndeploy; // per-project ACA undeploy removed; arg kept for callers
+    // Never delete out from under a running agent.
+    if (id === state.currentProjectId && isAgentBusy(state)) return;
     // Optimistically remove from UI immediately
     dispatch({ type: "REMOVE_PROJECT", id });
     if (state.currentProjectId === id) {
@@ -17285,7 +17345,7 @@ export function App() {
     }
     await api(`/projects/${id}`, { method: "DELETE", body: JSON.stringify({ userId }) });
     loadProjects();
-  }, [userId, state.currentProjectId, loadProjects]);
+  }, [userId, state.currentProjectId, state.isStreaming, state.projectActiveChatId, loadProjects]);
 
   // Unlink a project that was shared with the current user. The same teardown
   // path as deleteProject applies if the unlinked entry happens to be the
@@ -17293,6 +17353,8 @@ export function App() {
   // at a workspace the current user can no longer access.
   const unlinkProject = useCallback(async (id) => {
     const wasActive = state.currentProjectId === id;
+    // Same reasoning as deleteProject — don't tear down a project mid-turn.
+    if (wasActive && isAgentBusy(state)) return;
     dispatch({ type: "REMOVE_PROJECT", id });
     if (wasActive) {
       dispatch({ type: "CLEAR_PROJECT" });
@@ -17308,7 +17370,7 @@ export function App() {
       body: JSON.stringify({ userId }),
     });
     loadProjects();
-  }, [userId, state.currentProjectId, loadProjects]);
+  }, [userId, state.currentProjectId, state.isStreaming, state.projectActiveChatId, loadProjects]);
 
   // Close the currently active project — return to the gallery without
   // deleting or unlinking. Stops the preview npm child process (so the
@@ -17318,6 +17380,9 @@ export function App() {
   const closeProject = useCallback(async () => {
     const id = state.currentProjectId;
     if (!id) return;
+    // Releasing the lock mid-turn would leave the agent writing into a workspace
+    // another user can immediately claim. The Stop button is the way out.
+    if (isAgentBusy(state)) return;
     // stop-process requires the server lock to still be held, so it
     // must run BEFORE lock/release. Best-effort: if the process is
     // already gone or the call fails, still proceed with the close.
@@ -17342,10 +17407,12 @@ export function App() {
     setPreviewState(EMPTY_PREVIEW_STATE);
     loadedPreviewInstanceRef.current = null;
     if (iframeRef.current) iframeRef.current.src = "about:blank";
-  }, [state.currentProjectId, userId, releaseLock]);
+  }, [state.currentProjectId, state.isStreaming, state.projectActiveChatId, userId, releaseLock]);
 
   // Create project (two-phase: register metadata, then initialize workspace with SSE progress)
   const createProject = useCallback(async (name, appTemplate) => {
+    // Creating switches away from the open project, releasing its lock.
+    if (isAgentBusy(state)) return;
     const body = { userId, name, ...(appTemplate ? { appTemplate } : {}) };
     if (thinkingLevel) body.llmConfig = { thinkingLevel };
     // Phase 1: Register project metadata (fast)
@@ -17396,7 +17463,7 @@ export function App() {
     });
     // Repository setup (choose a VCS profile, then Create/Connect the remote)
     // now happens in Project Settings → Version control, not during creation.
-  }, [userId, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, serverManaged, refreshGitRemoteStatus, setProjectSteps, t, loadProjects, dispatch, iframeRef, state.currentProjectId, acquireServerLock, releaseServerLock]);
+  }, [userId, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, serverManaged, refreshGitRemoteStatus, setProjectSteps, t, loadProjects, dispatch, iframeRef, state.currentProjectId, state.isStreaming, state.projectActiveChatId, acquireServerLock, releaseServerLock]);
 
   // Send prompt
   const handleSend = useCallback(async (text, attachments = []) => {
@@ -17633,8 +17700,24 @@ export function App() {
     if (serverConfig !== null && !llmConfigured && isAdmin) setShowSettings(true);
   }, [serverConfig, llmConfigured, isAdmin]);
 
+  // Single source of truth for "don't let the user walk away from this project".
+  const agentBusy = isAgentBusy(state);
+
+  // Desktop only: the OS window ✕ and Cmd+Q would tear down the in-process
+  // server running the turn, and neither can be greyed out from here — so push
+  // the state (and the localized notice) to the main process, which refuses the
+  // close instead. Optional chaining no-ops in the browser build and in older
+  // desktop builds whose preload predates setAgentBusy.
+  useEffect(() => {
+    window.vcaDesktop?.setAgentBusy?.({
+      busy: agentBusy,
+      title: t("desktop.busyCloseTitle"),
+      message: t("desktop.busyCloseMessage", { name: state.currentProjectName || "" }),
+    });
+  }, [agentBusy, state.currentProjectName, t]);
+
   const ctx = useMemo(() => ({
-    state, dispatch, userId, authUser, authEnabled, isAdmin, apiKey, setApiKey,
+    state, dispatch, agentBusy, userId, authUser, authEnabled, isAdmin, apiKey, setApiKey,
     llmProvider, setLlmProvider, llmModelId, setLlmModelId, llmEndpoint, setLlmEndpoint, llmApiVersion, setLlmApiVersion, thinkingLevel, setThinkingLevel,
     sessionConfig, setSessionConfig,
     imageProvider, setImageProvider, imageModelId, setImageModelId, imageApiKey, setImageApiKey,
@@ -17668,7 +17751,7 @@ export function App() {
     projectLogs, setProjectLogs,
     architectMode, setArchitectMode,
     sidebarHandlePulse,
-  }), [state, userId, authUser, authEnabled, isAdmin, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, thinkingLevel, sessionConfig, imageProvider, imageModelId, imageApiKey, serverConfig, serverManaged, imageServerManaged, imageConfigured, llmConfigured, reloadServerConfig, selectProject, deleteProject, unlinkProject, closeProject, createProject, loadProjects, confirmTakeover, cancelTakeover, reclaimProject, takeOverFromOtherUser, cancelServerLockHeld, retakeServerLock, releaseServerLock, handleSend, handleAbort, handleCompact, clearChat, selectChat, createChat, renameChat, deleteChat, refreshPreview, reloadMessages, reloadDiagrams, theme, toggleTheme, deployStatus, refreshDeployStatus, gitRemoteConfigured, refreshGitRemoteStatus, addScreenshotAttachment, pendingScreenshot, clearPendingScreenshot, onboardingStep, advanceOnboarding, dismissOnboarding, useCaseMermaid, useCasePulse, deploymentMermaid, deploymentPulse, componentMermaid, componentPulse, activityPulse, erPulse, contextUsage, tokenStats, projectCost, devFocus, sidebarWidth, t, lang, setLang, serverLogLines, previewState, applyPreviewState, captureScreenshotRef, projectSteps, projectLogs, architectMode, sidebarHandlePulse, serverLogPulse]);
+  }), [state, agentBusy, userId, authUser, authEnabled, isAdmin, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, thinkingLevel, sessionConfig, imageProvider, imageModelId, imageApiKey, serverConfig, serverManaged, imageServerManaged, imageConfigured, llmConfigured, reloadServerConfig, selectProject, deleteProject, unlinkProject, closeProject, createProject, loadProjects, confirmTakeover, cancelTakeover, reclaimProject, takeOverFromOtherUser, cancelServerLockHeld, retakeServerLock, releaseServerLock, handleSend, handleAbort, handleCompact, clearChat, selectChat, createChat, renameChat, deleteChat, refreshPreview, reloadMessages, reloadDiagrams, theme, toggleTheme, deployStatus, refreshDeployStatus, gitRemoteConfigured, refreshGitRemoteStatus, addScreenshotAttachment, pendingScreenshot, clearPendingScreenshot, onboardingStep, advanceOnboarding, dismissOnboarding, useCaseMermaid, useCasePulse, deploymentMermaid, deploymentPulse, componentMermaid, componentPulse, activityPulse, erPulse, contextUsage, tokenStats, projectCost, devFocus, sidebarWidth, t, lang, setLang, serverLogLines, previewState, applyPreviewState, captureScreenshotRef, projectSteps, projectLogs, architectMode, sidebarHandlePulse, serverLogPulse]);
 
   if (needsLogin) {
     return (
