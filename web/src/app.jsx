@@ -9141,7 +9141,10 @@ function ModelPickerDialog({ open, onOpenChange, provider, endpoint, apiKey, api
 //                    (["browser","device_code"] | ["device_code"] | ["browser"])
 //   allowManualPaste show the paste-the-redirect-URL box (codex only)
 //   note             render a keyPrefix.note line (OpenRouter's desktop-only caveat)
-function ProviderSignInCard({ t, active, reloadServerConfig, apiBase, keyPrefix, methods, allowManualPaste = false, note = false }) {
+//   onStatusChange   optional; called with { signedIn, healthy, pending } on every
+//                    status refresh so a parent (the setup wizard) can gate its
+//                    own Continue button on the sign-in outcome
+function ProviderSignInCard({ t, active, reloadServerConfig, apiBase, keyPrefix, methods, allowManualPaste = false, note = false, onStatusChange }) {
   const tk = (suffix, params) => t(`${keyPrefix}.${suffix}`, params);
   const primaryMethod = methods[0];
   const secondaryMethods = methods.slice(1);
@@ -9172,6 +9175,19 @@ function ProviderSignInCard({ t, active, reloadServerConfig, apiBase, keyPrefix,
 
   const login = status?.login;
   const pending = login?.status === "pending";
+
+  // Report the sign-in outcome upward. Held in a ref so an unstable parent
+  // callback can't invalidate `refresh`'s deps and restart the poll below.
+  const onStatusChangeRef = useRef(onStatusChange);
+  onStatusChangeRef.current = onStatusChange;
+  useEffect(() => {
+    if (!status) return;
+    onStatusChangeRef.current?.({
+      signedIn: status.signedIn === true,
+      healthy: status.healthy !== false,
+      pending: status.login?.status === "pending",
+    });
+  }, [status]);
 
   // Poll while a sign-in runs server-side; the flow completes out-of-band
   // (browser callback, pasted code, or device-code approval).
@@ -9773,6 +9789,828 @@ function ConfigImportDialog({ envelope, onClose, t, onApplied, onFailed }) {
   );
 }
 
+// ─── First-run setup wizard ──────────────────────────────────
+// Shown instead of the Settings dialog when no LLM is configured yet. The
+// AI Model Config tab is an admin tool — nine providers in a bare <select>,
+// free-text endpoint/api-version/model fields, a profile dropdown that hides
+// its own name field until you pick "+ New profile…", and no validation at
+// all. This walks a first-time user through the same four decisions in plain
+// language, verifies the result with a real request, and creates the first
+// profile silently.
+//
+// It writes through exactly the same endpoints as SettingsDialog.save(), so
+// there is one persistence path, not two.
+
+// Provider catalogue. `id` must match the <option value> list in the AI Model
+// Config tab and UserLLMConfig["provider"] on the server.
+//   group          "signin" | "key" | "advanced" — grouping and order on step 1
+//   label          i18n key for the tile heading (reuses the Settings strings,
+//                  already translated in all five locales)
+//   shortLabel     brand name used to build the generated profile name; not
+//                  translated, because these are product names
+//   auth           "oauth" | "key" | "key-optional"
+//   oauth          the props ProviderSignInCard takes, verbatim
+//   defaultModel   preselected, and the re-baseline when the provider changes
+//   needsEndpoint  "required" | "optional" | undefined
+//   endpointKind   which plain-language endpoint copy to use
+const WIZARD_PROVIDERS = [
+  {
+    id: "openai-codex", group: "signin", auth: "oauth", label: "settings.openaiCodex", shortLabel: "ChatGPT",
+    oauth: { apiBase: "/admin/codex-auth", keyPrefix: "settings.codex", methods: ["browser", "device_code"], allowManualPaste: true },
+    defaultModel: "gpt-5.5", canListModels: true,
+  },
+  {
+    id: "kimi-coding", group: "signin", auth: "oauth", label: "settings.kimiCoding", shortLabel: "Kimi Code",
+    oauth: { apiBase: "/admin/kimi-auth", keyPrefix: "settings.kimi", methods: ["device_code"] },
+    defaultModel: "k3", canListModels: true,
+  },
+  {
+    id: "openrouter", group: "signin", auth: "key-optional", label: "settings.openrouter", shortLabel: "OpenRouter",
+    oauth: { apiBase: "/admin/openrouter-auth", keyPrefix: "settings.openrouter.oauth", methods: ["browser"], note: true },
+    oauthDesktopOnly: true,
+    keyPlaceholder: "sk-or-...", keyPrefixHint: "sk-or-", getKeyUrl: "https://openrouter.ai/keys",
+    needsEndpoint: "optional", endpointKind: "optional", endpointPlaceholder: "https://openrouter.ai/api/v1",
+    defaultModel: "anthropic/claude-sonnet-5", canListModels: true,
+  },
+  {
+    id: "anthropic", group: "key", auth: "key", label: "settings.anthropic", shortLabel: "Claude",
+    keyPlaceholder: "sk-ant-...", keyPrefixHint: "sk-ant-", getKeyUrl: "https://console.anthropic.com/settings/keys",
+    defaultModel: "claude-sonnet-5", canListModels: true,
+  },
+  {
+    id: "openai", group: "key", auth: "key", label: "settings.openai", shortLabel: "OpenAI",
+    keyPlaceholder: "sk-...", keyPrefixHint: "sk-", getKeyUrl: "https://platform.openai.com/api-keys",
+    defaultModel: "gpt-5.5", canListModels: true,
+  },
+  {
+    id: "google", group: "key", auth: "key", label: "settings.google", shortLabel: "Gemini",
+    keyPlaceholder: "AIza...", keyPrefixHint: "AIza", getKeyUrl: "https://aistudio.google.com/apikey",
+    defaultModel: "gemini-2.5-pro", canListModels: true,
+  },
+  {
+    id: "azure-ai-foundry", group: "advanced", auth: "key", label: "settings.azureFoundry", shortLabel: "Azure AI Foundry",
+    keyPlaceholder: "Azure API Key",
+    needsEndpoint: "required", endpointKind: "azure", endpointPlaceholder: "https://...services.ai.azure.com/anthropic",
+    defaultModel: "claude-sonnet-5", canListModels: true, freeTextModel: "azure",
+  },
+  {
+    id: "azure-openai", group: "advanced", auth: "key", label: "settings.azureOpenai", shortLabel: "Azure OpenAI",
+    keyPlaceholder: "Azure API Key",
+    needsEndpoint: "required", endpointKind: "azure", endpointPlaceholder: "https://...azure-api.net/apim-openai/openai/",
+    needsApiVersion: true, defaultApiVersion: "2025-04-01-preview",
+    defaultModel: "gpt-5.5", canListModels: true, freeTextModel: "azure",
+  },
+  {
+    id: "openai-compatible", group: "advanced", auth: "key-optional", label: "settings.openaiCompatible", shortLabel: "Local",
+    keyPlaceholder: "settings.apiKeyOptional",
+    needsEndpoint: "required", endpointKind: "local", endpointPlaceholder: "http://localhost:1234/v1",
+    defaultModel: "", canListModels: true, freeTextModel: "local",
+  },
+];
+
+const SETUP_STEPS = ["provider", "credential", "model", "verify"];
+
+// Which of the three verify rows a failure code belongs to. Rows before it
+// render as passed, rows after stay pending.
+const SETUP_ERROR_ROW = {
+  NETWORK_UNREACHABLE: 0, TLS_ERROR: 0, TIMEOUT: 0, ENDPOINT_REQUIRED: 0, ENDPOINT_INVALID: 0,
+  AUTH_INVALID: 1, AUTH_FORBIDDEN: 1, OAUTH_NOT_SIGNED_IN: 1,
+  MODEL_NOT_FOUND: 2, NO_CREDIT: 2, RATE_LIMITED: 2, BUSY: 2, UNKNOWN: 2,
+};
+// Which step can fix each failure, for the "Back" button on the verify screen.
+const SETUP_ERROR_STEP = {
+  ENDPOINT_REQUIRED: "credential", ENDPOINT_INVALID: "credential",
+  AUTH_INVALID: "credential", AUTH_FORBIDDEN: "credential", OAUTH_NOT_SIGNED_IN: "credential",
+  MODEL_NOT_FOUND: "model",
+};
+
+function isHttpUrl(value) {
+  const v = (value || "").trim();
+  return /^https?:\/\/.+/i.test(v);
+}
+
+function SetupWizard({ onDone, onSkip, onOpenSettings }) {
+  const {
+    t, userId, reloadServerConfig,
+    setApiKey, setLlmProvider, setLlmModelId, setLlmEndpoint, setLlmApiVersion,
+    setImageProvider, setImageModelId, setImageApiKey,
+  } = useContext(AppContext);
+  const isDesktop = typeof window !== "undefined" && !!window.vcaDesktop;
+
+  const [step, setStep] = useState("provider");
+  const [draft, setDraft] = useState({ providerId: "", apiKey: "", endpoint: "", apiVersion: "", modelId: "", modelName: "" });
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [oauthState, setOauthState] = useState({ signedIn: false, healthy: true, pending: false });
+  // A key is already stored for this provider (re-run from Settings). Until the
+  // user chooses to replace it, draft.apiKey carries the UNCHANGED sentinel.
+  const [storedKeyProvider, setStoredKeyProvider] = useState("");
+  const [replacingKey, setReplacingKey] = useState(false);
+  const [existingNames, setExistingNames] = useState([]);
+  const [test, setTest] = useState(null);   // null | { running: true } | result
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const [profileWarning, setProfileWarning] = useState(null);
+  const [leaveOpen, setLeaveOpen] = useState(false);
+
+  const provider = WIZARD_PROVIDERS.find((p) => p.id === draft.providerId) || null;
+  const patch = (fields) => setDraft((d) => ({ ...d, ...fields }));
+
+  // Re-run from Settings: seed the form from the live configuration so the
+  // user isn't retyping what's already there. Secrets arrive redacted as the
+  // UNCHANGED sentinel, which the server resolves back on save.
+  useEffect(() => {
+    let cancelled = false;
+    api("/admin/vca-settings")
+      .then((r) => {
+        const s = r?.settings;
+        if (cancelled || !s || !s.llmProvider) return;
+        if (!WIZARD_PROVIDERS.some((p) => p.id === s.llmProvider)) return;
+        setDraft({
+          providerId: s.llmProvider,
+          apiKey: s.apiKey || "",
+          endpoint: s.llmEndpoint || "",
+          apiVersion: s.llmApiVersion || "",
+          modelId: s.llmModelId || "",
+          modelName: "",
+        });
+        if (s.apiKey === AUTH_SECRET_SENTINEL) setStoredKeyProvider(s.llmProvider);
+      })
+      .catch(() => { /* first run — nothing stored yet, keep the blank draft */ });
+    api("/admin/llm-profiles")
+      .then((r) => { if (!cancelled) setExistingNames((Array.isArray(r?.profiles) ? r.profiles : []).map((p) => p.name)); })
+      .catch(() => { /* name dedupe is cosmetic */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const pickProvider = (p) => {
+    // Re-baseline the model id: an id carried over from another provider (an
+    // Azure deployment name reaching the Codex backend, say) fails upstream.
+    // Same guard the provider <select> in Settings applies.
+    const keepStoredKey = storedKeyProvider === p.id && !replacingKey;
+    setDraft({
+      providerId: p.id,
+      apiKey: keepStoredKey ? AUTH_SECRET_SENTINEL : "",
+      endpoint: p.id === draft.providerId ? draft.endpoint : "",
+      apiVersion: p.needsApiVersion ? (p.id === draft.providerId && draft.apiVersion ? draft.apiVersion : p.defaultApiVersion || "") : "",
+      modelId: p.defaultModel,
+      modelName: "",
+    });
+    setOauthState({ signedIn: false, healthy: true, pending: false });
+    setTest(null);
+    setStep("credential");
+  };
+
+  const usingStoredKey = storedKeyProvider === draft.providerId && !replacingKey;
+  const keyOk = !provider || provider.auth !== "key" || usingStoredKey || draft.apiKey.trim().length > 0;
+  const oauthOk = !provider || provider.auth !== "oauth" || (oauthState.signedIn && oauthState.healthy);
+  const endpointOk = !provider || provider.needsEndpoint !== "required" || isHttpUrl(draft.endpoint);
+  const canLeaveCredential = keyOk && oauthOk && endpointOk && !oauthState.pending;
+
+  const runTest = useCallback(async () => {
+    setTest({ running: true });
+    try {
+      const r = await api("/admin/llm-test-connection", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: draft.providerId,
+          modelId: draft.modelId,
+          apiKey: draft.apiKey,
+          endpoint: draft.endpoint,
+          apiVersion: draft.apiVersion,
+        }),
+      });
+      setTest(r);
+    } catch (err) {
+      // Non-2xx only happens when the test couldn't be run at all.
+      setTest({ ok: false, code: "UNKNOWN", detail: err?.message || String(err), latencyMs: 0 });
+    }
+  }, [draft]);
+
+  useEffect(() => { if (step === "verify" && test === null) runTest(); }, [step, test, runTest]);
+
+  // Named after the model where the list gave us a display name ("Claude
+  // Sonnet 5"), otherwise brand + id ("Local · llama-3.3-70b"). Never the full
+  // provider label — "OpenAI-compatible (LM Studio, vLLM, Ollama…)" makes a
+  // terrible profile name.
+  const generateProfileName = () => {
+    const base = (draft.modelName || `${provider.shortLabel} · ${draft.modelId}`).slice(0, 64);
+    if (!existingNames.includes(base)) return base;
+    for (let n = 2; n < 100; n++) {
+      const candidate = `${base.slice(0, 58)} (${n})`;
+      if (!existingNames.includes(candidate)) return candidate;
+    }
+    return base;
+  };
+
+  const finishSetup = async () => {
+    setSaving(true);
+    setSaveError(null);
+    setProfileWarning(null);
+    // An empty llmProvider makes the backend fall through to env-var defaults,
+    // so `configured` would stay false and the wizard would reopen forever.
+    if (!provider) { setSaveError(t("setup.error.noProvider")); setSaving(false); return; }
+
+    // Image generation piggybacks on the LLM key where the provider does both.
+    // An OAuth token is not a reusable API key, so codex/kimi never qualify.
+    const imageCapable = provider.id === "google" || provider.id === "openai" || provider.id === "openrouter";
+    const imageModelId = imageCapable
+      ? { google: "gemini-3.1-flash-image-preview", openai: "gpt-image-1", openrouter: "google/gemini-2.5-flash-image-preview" }[provider.id]
+      : "gemini-3.1-flash-image-preview";
+    const payload = {
+      apiKey: draft.apiKey,
+      llmProvider: provider.id,
+      llmModelId: draft.modelId.trim(),
+      llmEndpoint: draft.endpoint.trim(),
+      llmApiVersion: draft.apiVersion.trim(),
+      // The wizard never sets token overrides — auto-detect from the catalog.
+      llmContextWindow: 0,
+      llmMaxTokens: 0,
+      // Web tools follow the provider automatically; write the same defaults
+      // SettingsDialog.save() writes.
+      webSearchEnabled: true,
+      webFetchEnabled: true,
+      webSearchModelId: "",
+      webSearchContextSize: "",
+      webSearchEngine: "",
+      webSearchMaxResults: 0,
+      webFetchEngine: "",
+      imageProvider: imageCapable ? provider.id : "google",
+      imageModelId,
+      imageApiKey: "",
+      imageUseLlmKey: imageCapable,
+    };
+    try {
+      await api("/admin/vca-settings", { method: "PUT", body: JSON.stringify(payload) });
+    } catch (err) {
+      // Nothing else has run yet — safe to stay put and retry.
+      setSaveError(t("setup.saveFailed", { message: err?.message || String(err) }));
+      setSaving(false);
+      return;
+    }
+
+    // First profile, created silently. Send the sentinel rather than the real
+    // key: the PUT above already persisted it and createLlmProfile resolves the
+    // sentinel server-side, so the secret doesn't ride a second request.
+    try {
+      await api("/admin/llm-profiles", {
+        method: "POST",
+        body: JSON.stringify({ ...payload, name: generateProfileName(), apiKey: AUTH_SECRET_SENTINEL, imageApiKey: AUTH_SECRET_SENTINEL }),
+      });
+      notifyLlmProfilesChanged();
+    } catch {
+      // Profiles are bookkeeping — the deployment is already usable. Warn and
+      // carry on rather than rolling back a working configuration.
+      setProfileWarning(t("setup.profileWarning"));
+    }
+
+    // Mirror SettingsDialog.save()'s context updates. AppContext holds
+    // non-secret display values only — never the real keys.
+    setApiKey("");
+    setLlmProvider(provider.id);
+    setLlmModelId(payload.llmModelId);
+    setLlmEndpoint(payload.llmEndpoint);
+    setLlmApiVersion(payload.llmApiVersion);
+    setImageProvider(payload.imageProvider);
+    setImageModelId(payload.imageModelId);
+    setImageApiKey("");
+
+    if (userId) {
+      try { await api(`/users/${userId}/reset-sessions`, { method: "POST", body: JSON.stringify({}) }); } catch { /* best effort */ }
+    }
+    // This is the call that flips llmConfigured and unmounts the wizard.
+    try { await reloadServerConfig(); } catch { /* the next /config poll settles it */ }
+    setSaving(false);
+    onDone();
+  };
+
+  const requestLeave = () => {
+    if (step === "provider") { onSkip(); return; }
+    setLeaveOpen(true);
+  };
+
+  const stepIndex = SETUP_STEPS.indexOf(step);
+
+  return (
+    <div className="setup-overlay" role="dialog" aria-modal="true" aria-label={t("setup.title")}>
+      <div className="setup-panel">
+        <button className="settings-close-x" onClick={requestLeave} aria-label={t("common.close")}>
+          <X size={16} />
+        </button>
+        <div className="setup-header">
+          <div className="modal-title" style={{ margin: 0 }}>
+            <Sparkles size={20} className="title-icon" />
+            {t("setup.title")}
+          </div>
+          <div className="setup-subtitle">{t("setup.subtitle")}</div>
+          <div className="setup-progress">
+            {SETUP_STEPS.map((s, i) => (
+              <div key={s} className={`setup-progress-step${i < stepIndex ? " done" : ""}${i === stepIndex ? " active" : ""}`}>
+                <div className="setup-progress-bar" />
+                <span>{t(`setup.step.${s}`)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="setup-body">
+          {step === "provider" && (
+            <SetupProviderStep t={t} isDesktop={isDesktop} selectedId={draft.providerId} onPick={pickProvider} advancedOpen={advancedOpen} setAdvancedOpen={setAdvancedOpen} />
+          )}
+          {step === "credential" && provider && (
+            <SetupCredentialStep
+              t={t} provider={provider} draft={draft} patch={patch} isDesktop={isDesktop}
+              onOauthStatus={setOauthState}
+              usingStoredKey={usingStoredKey}
+              onReplaceKey={() => { setReplacingKey(true); patch({ apiKey: "" }); }}
+            />
+          )}
+          {step === "model" && provider && (
+            <SetupModelStep
+              t={t} provider={provider} draft={draft}
+              onSelect={(id, name) => patch({ modelId: id, modelName: name || "" })}
+            />
+          )}
+          {step === "verify" && provider && (
+            <SetupVerifyStep
+              t={t} provider={provider} draft={draft} test={test}
+              saveError={saveError} profileWarning={profileWarning}
+            />
+          )}
+        </div>
+
+        <div className="modal-actions">
+          {step === "provider" ? (
+            <div className="setup-footer-links">
+              <button className="setup-link" onClick={onSkip}>{t("setup.action.later")}</button>
+              <button className="setup-link" onClick={onOpenSettings}>{t("setup.action.haveConfig")}</button>
+            </div>
+          ) : (
+            <button
+              className="btn-secondary"
+              disabled={saving}
+              onClick={() => {
+                // On the verify screen, go straight to the step that owns the
+                // failure rather than one step back.
+                const owner = step === "verify" && test && !test.running && !test.ok ? SETUP_ERROR_STEP[test.code] : null;
+                setTest(null);
+                setStep(owner || SETUP_STEPS[Math.max(0, stepIndex - 1)]);
+              }}
+            >
+              <ChevronLeft size={14} /> {t("setup.action.back")}
+            </button>
+          )}
+          {step === "credential" && (
+            <button className="btn-primary" disabled={!canLeaveCredential} onClick={() => setStep("model")}>
+              {oauthState.pending ? t("setup.action.waitingSignIn") : t("setup.action.continue")}
+              {!oauthState.pending && <ChevronRight size={14} />}
+            </button>
+          )}
+          {step === "model" && (
+            <button className="btn-primary" disabled={!draft.modelId.trim()} onClick={() => { setTest(null); setStep("verify"); }}>
+              {t("setup.action.continue")} <ChevronRight size={14} />
+            </button>
+          )}
+          {step === "verify" && (
+            <>
+              {test && !test.running && !test.ok && (
+                <>
+                  <button className="btn-secondary" disabled={saving} onClick={runTest}>
+                    <RefreshCw size={14} /> {t("setup.action.tryAgain")}
+                  </button>
+                  <button className="btn-faded" disabled={saving} onClick={finishSetup}>
+                    {t("setup.action.saveAnyway")}
+                  </button>
+                </>
+              )}
+              <button className="btn-primary" disabled={saving || !test || test.running || !test.ok} onClick={finishSetup}>
+                {saving ? <Loader size={14} className="spin" /> : <Check size={14} />}
+                {saving ? t("setup.verify.saving") : t("setup.action.finish")}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      <AlertDialog.Root open={leaveOpen} onOpenChange={setLeaveOpen}>
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="alert-overlay" />
+          <AlertDialog.Content className="alert-content">
+            <AlertDialog.Title className="alert-title">
+              <AlertTriangle size={18} style={{ color: "var(--error)" }} />
+              {t("setup.leave.title")}
+            </AlertDialog.Title>
+            <AlertDialog.Description className="alert-description">{t("setup.leave.body")}</AlertDialog.Description>
+            <div className="modal-actions">
+              <AlertDialog.Cancel asChild>
+                <button className="btn-secondary">{t("common.cancel")}</button>
+              </AlertDialog.Cancel>
+              <AlertDialog.Action asChild>
+                <button className="btn-danger" onClick={onSkip}>{t("setup.leave.confirm")}</button>
+              </AlertDialog.Action>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
+    </div>
+  );
+}
+
+function SetupProviderStep({ t, isDesktop, selectedId, onPick, advancedOpen, setAdvancedOpen }) {
+  const card = (p) => (
+    <button
+      key={p.id}
+      className={`setup-provider-card${selectedId === p.id ? " selected" : ""}`}
+      onClick={() => onPick(p)}
+    >
+      <span className="setup-provider-name">{t(p.label)}</span>
+      <span className="setup-provider-blurb">{t(`setup.blurb.${p.id}`)}</span>
+      {p.oauthDesktopOnly && !isDesktop && (
+        <span className="setup-provider-blurb" style={{ fontStyle: "italic" }}>{t("setup.desktopOnlySignIn")}</span>
+      )}
+    </button>
+  );
+  const group = (name) => WIZARD_PROVIDERS.filter((p) => p.group === name);
+
+  return (
+    <>
+      <div className="setup-group-title">{t("setup.group.signin")}</div>
+      <div className="setup-group-hint">{t("setup.group.signinHint")}</div>
+      <div className="setup-provider-grid">{group("signin").map(card)}</div>
+
+      <div className="setup-group-title">{t("setup.group.key")}</div>
+      <div className="setup-group-hint">{t("setup.group.keyHint")}</div>
+      <div className="setup-provider-grid">{group("key").map(card)}</div>
+
+      <Collapsible.Root open={advancedOpen} onOpenChange={setAdvancedOpen}>
+        <Collapsible.Trigger className="inline-collapse-trigger">
+          {advancedOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          {t("setup.group.advanced")}
+        </Collapsible.Trigger>
+        <Collapsible.Content className="inline-collapse-content">
+          <div className="setup-group-hint" style={{ marginTop: 8 }}>{t("setup.group.advancedHint")}</div>
+          <div className="setup-provider-grid" style={{ marginTop: 8 }}>{group("advanced").map(card)}</div>
+        </Collapsible.Content>
+      </Collapsible.Root>
+    </>
+  );
+}
+
+function SetupCredentialStep({ t, provider, draft, patch, isDesktop, onOauthStatus, usingStoredKey, onReplaceKey }) {
+  const { reloadServerConfig } = useContext(AppContext);
+  const signInCard = provider.oauth ? (
+    <ProviderSignInCard
+      t={t} active reloadServerConfig={reloadServerConfig}
+      {...provider.oauth}
+      onStatusChange={onOauthStatus}
+    />
+  ) : null;
+
+  const keyField = provider.auth === "oauth" ? null : (
+    <label className="modal-label">
+      {t("settings.apiKey")}
+      {usingStoredKey ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 13, color: "var(--text-muted)" }}>{t("setup.credential.keyOnFile")}</span>
+          <button className="btn-secondary btn-sm" onClick={onReplaceKey}>{t("setup.credential.replaceKey")}</button>
+        </div>
+      ) : (
+        <>
+          <input
+            type="password"
+            className="modal-input"
+            autoFocus
+            value={draft.apiKey}
+            onChange={(e) => patch({ apiKey: e.target.value })}
+            placeholder={provider.keyPlaceholder === "settings.apiKeyOptional" ? t("settings.apiKeyOptional") : provider.keyPlaceholder}
+          />
+          <span style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+            {provider.auth === "key-optional"
+              ? t("setup.credential.keyOptional")
+              : t("setup.credential.keyHint", { prefix: provider.keyPrefixHint })}
+          </span>
+          {provider.getKeyUrl && (
+            <a
+              className="btn-secondary"
+              style={{ alignSelf: "flex-start", width: "fit-content", marginTop: 8, textDecoration: "none" }}
+              href={provider.getKeyUrl} target="_blank" rel="noopener noreferrer"
+            >
+              <Key size={14} /> {t("setup.credential.getKey")} <ExternalLink size={12} />
+            </a>
+          )}
+        </>
+      )}
+    </label>
+  );
+
+  return (
+    <>
+      <div className="setup-group-title">
+        {provider.auth === "oauth" ? t("setup.credential.titleOauth")
+          /* key-optional means the key isn't the point — a local server needs
+             an endpoint, OpenRouter takes a key OR a sign-in. */
+          : provider.auth === "key-optional" ? t("setup.credential.titleConnect")
+          : t("setup.credential.titleKey")}
+      </div>
+
+      {provider.needsEndpoint && (
+        <label className="modal-label">
+          {provider.endpointKind === "azure" ? t("setup.credential.endpointAzure")
+            : provider.endpointKind === "local" ? t("setup.credential.endpointLocal")
+            : t("setup.credential.endpointOptional")}
+          <input
+            type="text"
+            className="modal-input"
+            value={draft.endpoint}
+            onChange={(e) => patch({ endpoint: e.target.value })}
+            placeholder={provider.endpointPlaceholder}
+          />
+          <span style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+            {provider.endpointKind === "azure" ? t("setup.credential.endpointAzureHint")
+              : provider.endpointKind === "local" ? t("setup.credential.endpointLocalHint")
+              : t("setup.credential.endpointOptionalHint")}
+          </span>
+          {provider.needsEndpoint === "required" && draft.endpoint.trim() && !isHttpUrl(draft.endpoint) && (
+            <span style={{ fontSize: 12, color: "var(--error)", marginTop: 4 }}>{t("setup.credential.endpointInvalid")}</span>
+          )}
+        </label>
+      )}
+
+      {provider.needsApiVersion && (
+        <label className="modal-label">
+          {t("setup.credential.apiVersion")}
+          <input
+            type="text"
+            className="modal-input"
+            value={draft.apiVersion}
+            onChange={(e) => patch({ apiVersion: e.target.value })}
+            placeholder={provider.defaultApiVersion}
+          />
+          <span style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>{t("setup.credential.apiVersionHint")}</span>
+        </label>
+      )}
+
+      {/* OpenRouter takes either credential. Sign-in is the nicer path on the
+          desktop build; in the browser its loopback redirect can't complete,
+          so the key field leads there. */}
+      {provider.oauthDesktopOnly && !isDesktop
+        ? (<>{keyField}{signInCard}</>)
+        : (<>{signInCard}{keyField}</>)}
+    </>
+  );
+}
+
+function SetupModelStep({ t, provider, draft, onSelect }) {
+  const [models, setModels] = useState([]);
+  const [warning, setWarning] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [query, setQuery] = useState("");
+
+  // Same request the Settings model picker makes — one server-side proxy, so
+  // the stored key never reaches the browser.
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setModels([]);
+    setWarning(null);
+    api("/admin/llm-models", {
+      method: "POST",
+      body: JSON.stringify({
+        provider: provider.id,
+        endpoint: draft.endpoint.trim() || undefined,
+        apiKey: draft.apiKey || undefined,
+        ...(draft.apiVersion.trim() ? { apiVersion: draft.apiVersion.trim() } : {}),
+      }),
+    })
+      .then((r) => {
+        if (cancelled) return;
+        setModels(Array.isArray(r?.models) ? r.models : []);
+        setWarning(r?.warning || null);
+      })
+      .catch((e) => { if (!cancelled) setError({ message: e?.message || String(e), code: e?.code }); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+    // Fetch once per visit to this step. The step only mounts after the
+    // credential step is complete, and re-fetching on every keystroke of the
+    // free-text model field below would be wrong.
+  }, [provider.id]);
+
+  const filtered = useMemo(() => {
+    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const list = tokens.length
+      ? models.filter((m) => tokens.every((tk) => `${m.id} ${m.name} ${m.description || ""}`.toLowerCase().includes(tk)))
+      : models;
+    // Pin the recommended default to the top so the obvious choice is first.
+    const idx = list.findIndex((m) => m.id === provider.defaultModel);
+    if (idx > 0) return [list[idx], ...list.slice(0, idx), ...list.slice(idx + 1)];
+    return list;
+  }, [models, query, provider.defaultModel]);
+  const visible = filtered.slice(0, 60);
+
+  const warningText = warning?.code === "CATALOG_ONLY" ? t("settings.modelPicker.catalogNote")
+    : warning?.code === "KEY_MISSING" ? t("settings.modelPicker.catalogNoKey")
+    : warning ? t("settings.modelPicker.catalogUpstreamFailed")
+    : null;
+  const errorText = error?.code === "ENDPOINT_REQUIRED" ? t("settings.modelPicker.endpointRequired")
+    : error?.code === "UPSTREAM_AUTH" ? t("settings.modelPicker.authFailed")
+    : error?.code === "UPSTREAM_UNREACHABLE" || error?.code === "UPSTREAM_ERROR" ? t("settings.modelPicker.unreachable")
+    : error?.message;
+
+  return (
+    <>
+      <div className="setup-group-title">{t("setup.model.title")}</div>
+      <div className="setup-group-hint">{t("setup.model.subtitle")}</div>
+
+      {/* Azure deployments and local servers use names no catalog can know, so
+          the text field leads and the list is demoted to suggestions. */}
+      {provider.freeTextModel && (
+        <label className="modal-label">
+          {t("setup.model.deploymentLabel")}
+          <input
+            type="text"
+            className="modal-input"
+            autoFocus
+            value={draft.modelId}
+            onChange={(e) => onSelect(e.target.value, "")}
+            placeholder={provider.defaultModel}
+          />
+          <span style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 4 }}>
+            {provider.freeTextModel === "azure" ? t("setup.model.deploymentHintAzure") : t("setup.model.deploymentHintLocal")}
+          </span>
+        </label>
+      )}
+
+      {provider.freeTextModel && <div className="setup-group-title">{t("setup.model.suggestions")}</div>}
+
+      {!provider.freeTextModel && (
+        <div style={{ position: "relative" }}>
+          <Search size={14} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)", pointerEvents: "none" }} />
+          <input
+            type="text"
+            className="modal-input"
+            style={{ paddingLeft: 32, width: "100%", boxSizing: "border-box" }}
+            value={query}
+            placeholder={t("settings.modelPicker.searchPlaceholder")}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+      )}
+
+      {warningText && !loading && !error && (
+        <div className="model-picker-warning">
+          <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+          {warningText}
+        </div>
+      )}
+
+      {loading ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-muted)", padding: "12px 0" }}>
+          <Loader size={14} className="spin" /> {t("settings.modelPicker.loading")}
+        </div>
+      ) : error ? (
+        <div style={{ fontSize: 12, color: "var(--error)" }}>{errorText}</div>
+      ) : (
+        <div className="model-picker-list">
+          {visible.length === 0 && (
+            <div style={{ fontSize: 12, color: "var(--text-muted)", fontStyle: "italic", padding: "8px 0" }}>
+              {t("settings.modelPicker.empty")}
+            </div>
+          )}
+          {visible.map((m) => {
+            const ctx = formatTokenCount(m.contextWindow);
+            return (
+              <div
+                key={m.id}
+                className={`model-card${m.id === draft.modelId ? " active" : ""}`}
+                onClick={() => onSelect(m.id, m.name)}
+              >
+                <div className="model-card-header">
+                  {m.id === draft.modelId ? <CircleCheck size={14} style={{ color: "var(--accent)" }} /> : <Circle size={14} style={{ color: "var(--text-muted)" }} />}
+                  <div style={{ minWidth: 0 }}>
+                    <div className="model-card-name">
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
+                      {m.id === provider.defaultModel && (
+                        <span className="mcp-server-badge">{t("setup.model.recommended")}</span>
+                      )}
+                    </div>
+                    <div className="model-card-id">{m.id}</div>
+                    <div className="model-card-badges">
+                      {ctx && <span className="mcp-server-badge mcp-server-badge-muted">{ctx} {t("settings.modelPicker.context")}</span>}
+                      {m.pricing && (
+                        <span className="mcp-server-badge mcp-server-badge-muted">
+                          {t("settings.modelPicker.pricing", { input: formatModelPrice(m.pricing.input), output: formatModelPrice(m.pricing.output) })}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+}
+
+function SetupVerifyStep({ t, provider, draft, test, saveError, profileWarning }) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const running = !test || test.running;
+  const failedRow = test && !running && !test.ok ? (SETUP_ERROR_ROW[test.code] ?? 2) : -1;
+
+  const rowIcon = (i) => {
+    if (running) return <Loader size={14} className="spin" style={{ color: "var(--accent)" }} />;
+    if (test.ok) return <CircleCheck size={14} style={{ color: "var(--success)" }} />;
+    if (i < failedRow) return <CircleCheck size={14} style={{ color: "var(--success)" }} />;
+    if (i === failedRow) return <CircleX size={14} style={{ color: "var(--error)" }} />;
+    return <Circle size={14} style={{ color: "var(--text-muted)" }} />;
+  };
+
+  return (
+    <>
+      <div className="setup-group-title">{t("setup.verify.title")}</div>
+      <div className="setup-group-hint">{t("setup.verify.subtitle")}</div>
+
+      {["reach", "credentials", "message"].map((row, i) => (
+        <div key={row} className={`setup-check-row${!running && !test.ok && i > failedRow ? " pending" : ""}`}>
+          {rowIcon(i)} <span>{t(`setup.verify.${row}`)}</span>
+        </div>
+      ))}
+
+      {test && !running && test.ok && (
+        <div className="setup-success">
+          <CircleCheck size={16} />
+          {t("setup.verify.success", {
+            model: draft.modelName || draft.modelId,
+            seconds: (test.latencyMs / 1000).toFixed(1),
+          })}
+        </div>
+      )}
+
+      {test && !running && !test.ok && (
+        <>
+          <div className="skill-editor-error" role="alert">
+            <AlertTriangle size={14} />
+            <span>{t(`setup.error.${test.code}`)}</span>
+          </div>
+          {provider.getKeyUrl && (test.code === "AUTH_INVALID" || test.code === "NO_CREDIT") && (
+            <a className="btn-secondary" style={{ alignSelf: "flex-start", width: "fit-content", textDecoration: "none" }} href={provider.getKeyUrl} target="_blank" rel="noopener noreferrer">
+              <Key size={14} /> {t("setup.credential.getKey")} <ExternalLink size={12} />
+            </a>
+          )}
+          {test.detail && (
+            <Collapsible.Root open={detailsOpen} onOpenChange={setDetailsOpen}>
+              <Collapsible.Trigger className="inline-collapse-trigger">
+                {detailsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                {t("setup.verify.details")}
+              </Collapsible.Trigger>
+              <Collapsible.Content className="inline-collapse-content">
+                <pre className="setup-details-pre">{test.detail}</pre>
+              </Collapsible.Content>
+            </Collapsible.Root>
+          )}
+        </>
+      )}
+
+      {profileWarning && (
+        <div className="settings-info-banner"><Info size={14} /> {profileWarning}</div>
+      )}
+      {saveError && (
+        <div className="skill-editor-error" role="alert">
+          <AlertTriangle size={14} />
+          <span>{saveError}</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+// Non-admins can't configure an LLM, and the Settings dialog force-closes for
+// them — without this their first message would vanish with no explanation.
+function LlmNotConfiguredNotice({ open, onOpenChange }) {
+  const { t } = useContext(AppContext);
+  return (
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="modal-overlay" />
+        <Dialog.Content className="modal-content">
+          <Dialog.Title className="modal-title">
+            <Info size={20} className="title-icon" />
+            {t("setup.notAdmin.title")}
+          </Dialog.Title>
+          <div className="alert-description">{t("setup.notAdmin.body")}</div>
+          <div className="modal-actions">
+            <Dialog.Close asChild>
+              <button className="btn-primary"><X size={14} /> {t("common.close")}</button>
+            </Dialog.Close>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 // Sentinel value of the profile dropdown's "New profile…" entry.
 const NEW_PROFILE_ID = "__new__";
 
@@ -9792,7 +10630,7 @@ function formatTemplateDeployDefault(t, dep) {
 }
 
 function SettingsDialog({ open, onOpenChange }) {
-  const { apiKey, setApiKey, llmProvider, setLlmProvider, llmModelId, setLlmModelId, llmEndpoint, setLlmEndpoint, llmApiVersion, setLlmApiVersion, imageProvider, setImageProvider, imageModelId, setImageModelId, imageApiKey, setImageApiKey, serverManaged, serverConfig, imageServerManaged, userId, isAdmin, authEnabled, llmConfigured, reloadServerConfig, t, lang, setLang } = useContext(AppContext);
+  const { apiKey, setApiKey, llmProvider, setLlmProvider, llmModelId, setLlmModelId, llmEndpoint, setLlmEndpoint, llmApiVersion, setLlmApiVersion, imageProvider, setImageProvider, imageModelId, setImageModelId, imageApiKey, setImageApiKey, serverManaged, serverConfig, imageServerManaged, userId, isAdmin, authEnabled, llmConfigured, reloadServerConfig, openSetup, t, lang, setLang } = useContext(AppContext);
   // Anchors the "configure an LLM provider" onboarding tooltip when the
   // dialog opens with no provider set yet (first run, or admin cancelled
   // out of the initial Settings auto-open and then tried to create a
@@ -10895,6 +11733,15 @@ function SettingsDialog({ open, onOpenChange }) {
                   <span>{profileError}</span>
                 </div>
               )}
+              {/* The guided wizard covers the same ground in plain language —
+                  offered here so it stays reachable after the first run. */}
+              <button
+                className="btn-secondary btn-sm"
+                style={{ alignSelf: "flex-start" }}
+                onClick={() => { onOpenChange(false); openSetup(); }}
+              >
+                <Sparkles size={14} /> {t("settings.runSetupWizard")}
+              </button>
               <label className="modal-label" ref={llmHintRef}>
                 {t("settings.llmProvider")}
                 <select
@@ -16811,6 +17658,12 @@ export function App() {
   const { onboardingStep, advanceOnboarding, dismissOnboarding } = useOnboarding();
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [showNotConfigured, setShowNotConfigured] = useState(false);
+  // Session-scoped, not localStorage: a dismissed wizard shouldn't reappear in
+  // the same tab, but an admin who still has no LLM on the next launch really
+  // should be offered it again.
+  const setupSkippedRef = useRef(typeof sessionStorage !== "undefined" && sessionStorage.getItem("vca-setup-skipped") === "1");
   const [showNewProject, setShowNewProject] = useState(false);
   const [showProjectsGallery, setShowProjectsGallery] = useState(false);
   const [showCommits, setShowCommits] = useState(false);
@@ -16899,6 +17752,24 @@ export function App() {
   // membership). No "auth disabled → everyone admin" shortcut any more —
   // VCA always requires a real login.
   const isAdmin = authUser?.isAdmin === true;
+
+  // Explicit "configure the LLM now" — from Send, or the Settings button.
+  // Bypasses the session skip flag, since this is the user asking for it.
+  // Declared here rather than next to the auto-open effect below because
+  // handleSend closes over it.
+  const openSetup = useCallback(() => {
+    if (!isAdmin) { setShowNotConfigured(true); return; }
+    setupSkippedRef.current = false;
+    try { sessionStorage.removeItem("vca-setup-skipped"); } catch { /* private mode */ }
+    setShowSettings(false);
+    setShowSetupWizard(true);
+  }, [isAdmin]);
+
+  const skipSetup = useCallback(() => {
+    setupSkippedRef.current = true;
+    try { sessionStorage.setItem("vca-setup-skipped", "1"); } catch { /* private mode */ }
+    setShowSetupWizard(false);
+  }, []);
 
   // Resolve the current user. VCA always requires a real session — when no
   // session is present (or it can't be refreshed), the LoginScreen takes over
@@ -17563,7 +18434,7 @@ export function App() {
     // Block if another chat in this project is currently running an agent.
     // The backend will 409 anyway, but skipping the round-trip is friendlier.
     if (state.projectActiveChatId && state.projectActiveChatId !== state.currentChatId) return;
-    if (!llmConfigured) { setShowSettings(true); return; }
+    if (!llmConfigured) { openSetup(); return; }
 
     // Build display message
     const imageAttachments = attachments.filter(a => a.type === "image");
@@ -17637,7 +18508,7 @@ export function App() {
       }
       dispatch({ type: "ADD_MESSAGE", message: { type: "assistant", text: `Error: ${err.message}`, streaming: false } });
     }
-  }, [state.isStreaming, state.projectActiveChatId, state.currentProjectId, state.currentChatId, userId, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, serverManaged, lang, useCaseMermaid, deploymentMermaid, devFocus, authUser]);
+  }, [state.isStreaming, state.projectActiveChatId, state.currentProjectId, state.currentChatId, userId, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, serverManaged, llmConfigured, openSetup, lang, useCaseMermaid, deploymentMermaid, devFocus, authUser]);
 
   // Abort
   const handleAbort = useCallback(async () => {
@@ -17781,16 +18652,20 @@ export function App() {
     }
   }, [state.currentProjectId, userId]);
 
-  // Auto-open Settings on first load when no LLM is configured. The dialog
-  // itself enforces admin-only — non-admins get a no-op since they can't
-  // configure anything anyway. Gate on `isAdmin` here too: serverConfig
-  // resolves before authUser (the /auth/me fetch waits for serverConfig),
-  // so if we fired solely on serverConfig the SettingsDialog's admin
-  // useEffect would close the dialog the same tick — and the effect
-  // wouldn't re-fire when isAdmin later flips to true.
+  // First-run setup. The guided wizard opens on first load when no LLM is
+  // configured — the AI Model Config tab is an admin tool and a poor first
+  // experience. Gate on `isAdmin` here: serverConfig resolves before authUser
+  // (the /auth/me fetch waits for serverConfig), so firing solely on
+  // serverConfig would show the wizard to a user who can't save anything, and
+  // the effect wouldn't re-fire when isAdmin later flips to true. env-var
+  // (serverManaged) deployments are excluded entirely — the backend ignores
+  // vca-settings.json there, so nothing the wizard writes would take effect.
   useEffect(() => {
-    if (serverConfig !== null && !llmConfigured && isAdmin) setShowSettings(true);
-  }, [serverConfig, llmConfigured, isAdmin]);
+    if (serverConfig === null) return;
+    if (llmConfigured || serverManaged) { setShowSetupWizard(false); return; }
+    if (!isAdmin || setupSkippedRef.current) return;
+    setShowSetupWizard(true);
+  }, [serverConfig, llmConfigured, serverManaged, isAdmin]);
 
   // Single source of truth for "don't let the user walk away from this project".
   const agentBusy = isAgentBusy(state);
@@ -17822,6 +18697,7 @@ export function App() {
     iframeRef, theme, toggleTheme, deployStatus, refreshDeployStatus,
     gitRemoteConfigured, refreshGitRemoteStatus,
     setShowSettings, setShowNewProject, setShowProjectsGallery, setShowCommits, setShowGit, setShowSkills, setShowDeploy,
+    openSetup,
     addScreenshotAttachment, pendingScreenshot, clearPendingScreenshot,
     onboardingStep, advanceOnboarding, dismissOnboarding,
     useCaseMermaid, setUseCaseMermaid, useCasePulse, setUseCasePulse,
@@ -17843,7 +18719,7 @@ export function App() {
     projectLogs, setProjectLogs,
     architectMode, setArchitectMode,
     sidebarHandlePulse,
-  }), [state, agentBusy, userId, authUser, authEnabled, isAdmin, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, thinkingLevel, sessionConfig, imageProvider, imageModelId, imageApiKey, serverConfig, serverManaged, imageServerManaged, imageConfigured, llmConfigured, reloadServerConfig, selectProject, deleteProject, unlinkProject, closeProject, createProject, loadProjects, confirmTakeover, cancelTakeover, reclaimProject, takeOverFromOtherUser, cancelServerLockHeld, retakeServerLock, releaseServerLock, handleSend, handleAbort, handleCompact, clearChat, selectChat, createChat, renameChat, deleteChat, refreshPreview, reloadMessages, reloadDiagrams, theme, toggleTheme, deployStatus, refreshDeployStatus, gitRemoteConfigured, refreshGitRemoteStatus, addScreenshotAttachment, pendingScreenshot, clearPendingScreenshot, onboardingStep, advanceOnboarding, dismissOnboarding, useCaseMermaid, useCasePulse, deploymentMermaid, deploymentPulse, componentMermaid, componentPulse, activityPulse, erPulse, contextUsage, tokenStats, projectCost, devFocus, sidebarWidth, t, lang, setLang, serverLogLines, previewState, applyPreviewState, captureScreenshotRef, projectSteps, projectLogs, architectMode, sidebarHandlePulse, serverLogPulse]);
+  }), [state, agentBusy, userId, authUser, authEnabled, isAdmin, apiKey, llmProvider, llmModelId, llmEndpoint, llmApiVersion, thinkingLevel, sessionConfig, imageProvider, imageModelId, imageApiKey, serverConfig, serverManaged, imageServerManaged, imageConfigured, llmConfigured, reloadServerConfig, selectProject, deleteProject, unlinkProject, closeProject, createProject, loadProjects, confirmTakeover, cancelTakeover, reclaimProject, takeOverFromOtherUser, cancelServerLockHeld, retakeServerLock, releaseServerLock, handleSend, handleAbort, handleCompact, clearChat, selectChat, createChat, renameChat, deleteChat, refreshPreview, reloadMessages, reloadDiagrams, theme, toggleTheme, deployStatus, refreshDeployStatus, gitRemoteConfigured, refreshGitRemoteStatus, addScreenshotAttachment, pendingScreenshot, clearPendingScreenshot, onboardingStep, advanceOnboarding, dismissOnboarding, useCaseMermaid, useCasePulse, deploymentMermaid, deploymentPulse, componentMermaid, componentPulse, activityPulse, erPulse, contextUsage, tokenStats, projectCost, devFocus, sidebarWidth, t, lang, setLang, serverLogLines, previewState, applyPreviewState, captureScreenshotRef, projectSteps, projectLogs, architectMode, sidebarHandlePulse, serverLogPulse, openSetup]);
 
   if (needsLogin) {
     return (
@@ -17874,6 +18750,15 @@ export function App() {
           <ProjectLockTakenOverOverlay />
           <ServerLockInUseDialog />
           <ServerLockTakenOverOverlay />
+
+          {showSetupWizard && (
+            <SetupWizard
+              onDone={() => setShowSetupWizard(false)}
+              onSkip={skipSetup}
+              onOpenSettings={() => { skipSetup(); setShowSettings(true); }}
+            />
+          )}
+          <LlmNotConfiguredNotice open={showNotConfigured} onOpenChange={setShowNotConfigured} />
 
           <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
           <NewProjectDialog open={showNewProject} onOpenChange={setShowNewProject} />

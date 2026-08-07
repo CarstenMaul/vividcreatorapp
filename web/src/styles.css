@@ -5373,3 +5373,114 @@ button.project-badge:disabled { opacity: 0.5; cursor: default; }
 .icon-gen-prompt { resize: vertical; min-height: 64px; width: 100%; box-sizing: border-box; }
 .icon-gen-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .icon-gen-hint { font-size: 12px; color: var(--text-muted); }
+
+/* ─── First-run setup wizard ────────────────────────────────── */
+/* Full-screen takeover shown instead of the Settings dialog when no LLM is
+   configured yet. z-index 90 sits above the sidebars (50–60) so nothing else
+   competes for attention, but below .modal-overlay (100) so a dialog the user
+   opened on purpose still stacks on top. */
+.setup-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: var(--bg-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+  overflow: auto;
+}
+.setup-panel {
+  position: relative;
+  width: min(720px, 92vw);
+  max-height: 92vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 16px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.setup-header { display: flex; flex-direction: column; gap: 6px; }
+.setup-subtitle { font-size: 13px; color: var(--text-muted); }
+.setup-progress { display: flex; gap: 6px; margin-top: 10px; }
+.setup-progress-step {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.setup-progress-bar { height: 3px; border-radius: 2px; background: var(--border); }
+.setup-progress-step.done .setup-progress-bar { background: var(--success); }
+.setup-progress-step.active .setup-progress-bar { background: var(--accent); }
+.setup-progress-step.active { color: var(--text-primary); font-weight: 600; }
+.setup-body {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+.setup-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 4px;
+}
+.setup-group-hint { font-size: 12px; color: var(--text-muted); margin-top: -6px; }
+.setup-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
+}
+.setup-provider-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  /* The advanced group renders inside .inline-collapse-content, which is
+     italic 11px muted — reset so the tiles look the same in both groups. */
+  font-style: normal;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* Same reset for the hint line and the "technical details" body. */
+.setup-group-hint,
+.setup-details-pre { font-style: normal; }
+.setup-details-pre {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 6px 0 0 0;
+}
+.setup-provider-card:hover,
+.setup-provider-card.selected { border-color: var(--accent); }
+.setup-provider-name { font-size: 13px; font-weight: 600; color: var(--text-primary); }
+.setup-provider-blurb { font-size: 11.5px; color: var(--text-muted); line-height: 1.4; }
+.setup-check-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.setup-check-row.pending { color: var(--text-muted); }
+.setup-success { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--success); }
+.setup-footer-links { display: flex; align-items: center; gap: 12px; margin-right: auto; }
+.setup-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.setup-link:hover { color: var(--accent); }

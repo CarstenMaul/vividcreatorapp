@@ -35,7 +35,7 @@ import { getUserSkillRepos, removeUserSkillRepo } from "./user-skill-repos.js";
 import { withGitLock } from "./git-lock.js";
 import { DEFAULT_APP_VERSION, readAppVersion, writeAppVersion, bumpBuild, parseVersion, withMainMinor } from "./app-version.js";
 import { getSystemPromptRepoUrl } from "./system-prompt-sync.js";
-import { getCachedVcaSettings } from "./admin-settings.js";
+import { getCachedVcaSettings, type VcaSettings } from "./admin-settings.js";
 import {
   getAppTemplates,
   getAppTemplateByName,
@@ -3081,6 +3081,29 @@ function maskSecret(value: string): string {
   return value.slice(0, 4) + "••••" + value.slice(-4);
 }
 
+/**
+ * Does the stored config carry a usable credential for its provider?
+ *
+ * Not every provider authenticates with `apiKey`:
+ *  - openai-codex / kimi-coding sign in with a deployment-wide OAuth credential
+ *    and have NO key field in the UI at all;
+ *  - openrouter accepts either a static key OR an OAuth-minted one;
+ *  - openai-compatible servers (LM Studio, Ollama, vLLM) typically accept any
+ *    key, so the endpoint is the real requirement.
+ * Keying `configured` off `apiKey` alone left all of those permanently
+ * "unconfigured", which re-opens first-run setup forever and makes the send
+ * path bounce the user back to Settings instead of sending.
+ */
+function hasProviderCredential(stored: VcaSettings): boolean {
+  switch (stored.llmProvider) {
+    case "openai-codex":      return hasCodexCredential();
+    case "kimi-coding":       return hasKimiCredential();
+    case "openrouter":        return !!stored.apiKey || hasOpenRouterCredential();
+    case "openai-compatible": return !!stored.llmEndpoint;
+    default:                  return !!stored.apiKey;
+  }
+}
+
 export function getLLMConfig(): LLMConfig {
   if (process.env.AZURE_AI_FOUNDRY_ENDPOINT) {
     const modelId = process.env.AZURE_AI_FOUNDRY_MODEL || process.env.MODEL || "";
@@ -3113,10 +3136,9 @@ export function getLLMConfig(): LLMConfig {
       provider: stored.llmProvider,
       modelId,
       displayName: `${stored.llmProvider}${modelId ? ` / ${modelId}` : ""}`,
-      // openai-codex has no API key — configured means "signed in with ChatGPT".
-      configured: stored.llmProvider === "openai-codex"
-        ? hasCodexCredential() && !!modelId
-        : !!stored.apiKey && !!modelId,
+      // Several providers have no API key at all (OAuth sign-in, or a local
+      // server) — see hasProviderCredential.
+      configured: !!modelId && hasProviderCredential(stored),
     };
   }
   const { provider, modelId } = getProviderAndModel();

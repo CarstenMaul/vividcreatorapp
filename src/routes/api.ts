@@ -272,6 +272,7 @@ import {
   type UserPrefs,
 } from "../user-prefs.js";
 import { listLlmModels, ModelListError } from "../llm-models.js";
+import { testLlmConnection } from "../llm-test-connection.js";
 import { getProviderAuthManager } from "../provider-auth-registry.js";
 import { OAuthLoginPendingError } from "../provider-oauth.js";
 import { readProjectCost } from "../project-cost.js";
@@ -709,6 +710,39 @@ apiRouter.post("/admin/llm-models", async (req: Request, res: Response) => {
       return;
     }
     console.error("[llm-models] failed:", err);
+    res.status(500).json({ error: err?.message || String(err) });
+  }
+});
+
+// Admin: live connection test for the setup wizard. Sends one tiny real
+// inference request through the same resolver a chat turn uses (see
+// src/llm-test-connection.ts) so a green result actually means chat will work.
+//
+// A failed probe is a *successful* test, so it comes back 200 with
+// { ok: false, code }. Non-2xx is reserved for "the test could not be run at
+// all". That also makes it structurally impossible to leak an upstream 401
+// into the frontend api() helper's session-expiry path.
+apiRouter.post("/admin/llm-test-connection", async (req: Request, res: Response) => {
+  if (!getSessionIsAdmin(req)) {
+    res.status(403).json({ error: "Admin access required" });
+    return;
+  }
+  try {
+    await loadVcaSettings();
+    const body = (req.body || {}) as { provider?: unknown; modelId?: unknown; apiKey?: unknown; endpoint?: unknown; apiVersion?: unknown };
+    if (typeof body.provider !== "string" || !body.provider) {
+      res.status(400).json({ error: "provider is required", code: "PROVIDER_REQUIRED" });
+      return;
+    }
+    res.json(await testLlmConnection({
+      provider: body.provider,
+      modelId: typeof body.modelId === "string" ? body.modelId.trim() : "",
+      apiKey: typeof body.apiKey === "string" ? body.apiKey : "",
+      endpoint: typeof body.endpoint === "string" ? body.endpoint.trim() : "",
+      apiVersion: typeof body.apiVersion === "string" ? body.apiVersion.trim() : "",
+    }));
+  } catch (err: any) {
+    console.error("[llm-test] failed:", err?.message || err);
     res.status(500).json({ error: err?.message || String(err) });
   }
 });
