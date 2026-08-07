@@ -11831,15 +11831,6 @@ function SettingsDialog({ open, onOpenChange }) {
                   <span>{profileError}</span>
                 </div>
               )}
-              {/* The guided wizard covers the same ground in plain language —
-                  offered here so it stays reachable after the first run. */}
-              <button
-                className="btn-secondary btn-sm"
-                style={{ alignSelf: "flex-start" }}
-                onClick={() => { onOpenChange(false); openSetup(); }}
-              >
-                <Sparkles size={14} /> {t("settings.runSetupWizard")}
-              </button>
               <label className="modal-label" ref={llmHintRef}>
                 {t("settings.llmProvider")}
                 <select
@@ -12696,6 +12687,19 @@ function SettingsDialog({ open, onOpenChange }) {
                   <span style={{ display: "inline-flex", alignItems: "center", gap: 4, color: "var(--success)", fontSize: 13 }}>
                     <CircleCheck size={14} /> {t("settings.savedFeedback")}
                   </span>
+                )}
+                {/* The guided wizard covers the same ground in plain language —
+                    offered next to Save so it stays reachable after the first
+                    run. Same guards as the provider form it replaces: admins
+                    only, and never on env-configured deployments where the
+                    backend ignores whatever the wizard would write. */}
+                {activeTab === "general" && isAdmin && !serverManaged && (
+                  <button
+                    className="btn-primary"
+                    onClick={() => { onOpenChange(false); openSetup(); }}
+                  >
+                    <Sparkles size={14} /> {t("settings.runSetupWizard")}
+                  </button>
                 )}
                 <button
                   className={`btn-primary${footerSave?.dirty ? "" : " btn-faded"}`}
