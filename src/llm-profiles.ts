@@ -21,6 +21,14 @@ import { UNCHANGED_SECRET_SENTINEL } from "./auth-config.js";
 export interface LlmProfile {
   id: string;
   name: string;
+  /**
+   * Admin-authored note on what this profile is good at and when to reach for
+   * it ("heavy refactors, slow and expensive"). Purely descriptive: it is shown
+   * in Settings and handed to the agent by list_llm_profiles so it can pick a
+   * profile deliberately. The objective half (modalities, context, cost) is
+   * derived from pi's catalog instead — see src/model-capabilities.ts.
+   */
+  strengths: string;
   apiKey: string;
   llmProvider: string;
   llmModelId: string;
@@ -37,12 +45,28 @@ export interface LlmProfile {
 
 const SECRET_KEYS: Array<keyof LlmProfile> = ["apiKey", "imageApiKey"];
 
+// The note rides in every list_llm_profiles result, so it has to stay short
+// enough that a fleet of profiles doesn't crowd out the agent's context.
+const STRENGTHS_MAX_CHARS = 500;
+
 let writeMutex: Promise<unknown> = Promise.resolve();
 
 function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
   const next = writeMutex.then(fn, fn);
   writeMutex = next.catch(() => undefined);
   return next;
+}
+
+// Create/update reject an over-long note rather than truncating it, so the
+// admin never silently loses half a sentence. coerceProfile — which also sees
+// imported and hand-edited files — truncates instead: dropping a whole profile
+// over a long description would be worse than shortening it.
+function normalizeStrengths(raw: unknown): string {
+  const s = typeof raw === "string" ? raw.trim() : "";
+  if (s.length > STRENGTHS_MAX_CHARS) {
+    throw new Error(`Profile strengths must be ${STRENGTHS_MAX_CHARS} characters or fewer`);
+  }
+  return s;
 }
 
 function coerceProfile(raw: unknown): LlmProfile | null {
@@ -59,6 +83,9 @@ function coerceProfile(raw: unknown): LlmProfile | null {
   return {
     id,
     name,
+    // Absent in profiles written before strengths existed — "" is the correct
+    // reading of "the admin never described this one", so no migration needed.
+    strengths: pickStr("strengths").trim().slice(0, STRENGTHS_MAX_CHARS),
     apiKey: pickStr("apiKey"),
     llmProvider: pickStr("llmProvider"),
     llmModelId: pickStr("llmModelId"),
@@ -136,6 +163,7 @@ export async function createLlmProfile(
     ...input,
     id: randomUUID(),
     name,
+    strengths: normalizeStrengths(input.strengths),
     apiKey: input.apiKey === UNCHANGED_SECRET_SENTINEL ? fallbackSecrets.apiKey : input.apiKey,
     imageApiKey: input.imageApiKey === UNCHANGED_SECRET_SENTINEL ? fallbackSecrets.imageApiKey : input.imageApiKey,
   };
@@ -172,6 +200,7 @@ export async function updateLlmProfile(
     }
     merged.name = merged.name.trim();
     if (!merged.name) throw new Error("Profile name is required");
+    merged.strengths = normalizeStrengths(merged.strengths);
     const idx = data.profiles.findIndex((p) => p.id === id);
     data.profiles[idx] = merged;
     await writeFile(data);

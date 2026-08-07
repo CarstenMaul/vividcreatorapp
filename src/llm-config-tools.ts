@@ -1,7 +1,10 @@
 import { type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
 import { resolveLlmModelParts, getLLMConfig, sendSSEEvent, type ManagedSession, type UserLLMConfig } from "./agent-manager.js";
-import { getLlmProfile, listLlmProfiles } from "./llm-profiles.js";
+import { getLlmProfile, listLlmProfiles, type LlmProfile } from "./llm-profiles.js";
+import { describeProfileCapabilities } from "./model-capabilities.js";
+import { hasOpenRouterCredential } from "./openrouter-auth.js";
+import { getCachedVcaSettings } from "./admin-settings.js";
 
 // Tools that let the running agent change its own LLM profile (model/provider)
 // and/or reasoning effort mid-conversation, WITHOUT stopping. The switch is
@@ -11,6 +14,31 @@ import { getLlmProfile, listLlmProfiles } from "./llm-profiles.js";
 // continues. Nothing here rewrites the deployment-wide vca-settings.json or the
 // active-profile pointer, so other chats/users are unaffected. Profile secrets
 // stay server-side and are never surfaced to the model.
+
+/**
+ * Why a profile can't be hot-swapped into a live chat, or "" when it can.
+ * Predicts the `credentials` refusal set_llm_config performs below: providers
+ * whose auth lives in a shared OAuth credential store can't have it injected
+ * into a session's already-created runtime (and codex's SSE transport is fixed
+ * at session creation). Reporting it up front saves the agent a dead call.
+ *
+ * The key check mirrors mergeLlmConfigWithSettings: a profile with no key of
+ * its own inherits the deployment's — but only when the deployment runs the
+ * same provider.
+ */
+function notSwitchableReason(p: LlmProfile): string {
+  const bound = (name: string) =>
+    `Provider "${p.llmProvider}" signs in with a session-bound ${name} credential — switching to it needs a new chat.`;
+  if (p.llmProvider === "openai-codex") return bound("ChatGPT OAuth");
+  if (p.llmProvider === "kimi-coding") return bound("Kimi Code OAuth");
+  if (p.llmProvider === "openrouter") {
+    const stored = getCachedVcaSettings();
+    const effectiveKey = p.apiKey || (stored.llmProvider === "openrouter" ? stored.apiKey : "");
+    if (!effectiveKey && hasOpenRouterCredential()) return bound("OpenRouter OAuth");
+  }
+  return "";
+}
+
 export function createLlmConfigTools(getManagedSession: () => ManagedSession): ToolDefinition[] {
   const errResult = (text: string) => ({
     content: [{ type: "text" as const, text }],
@@ -21,22 +49,48 @@ export function createLlmConfigTools(getManagedSession: () => ManagedSession): T
   const listProfilesTool: ToolDefinition = {
     name: "list_llm_profiles",
     label: "List LLM Profiles",
-    description: "List the LLM profiles you can switch to with set_llm_config (id, name, provider, model). Never returns secrets. Also reports which profile is currently active for the deployment.",
-    promptSnippet: "list_llm_profiles — list the LLM profiles you can switch to with set_llm_config",
+    description:
+      "List the LLM profiles you can switch to with set_llm_config. Each entry carries the id/name/provider/model, the model's capabilities (input modalities — \"image\" means it can read screenshots; reasoning support and the efforts it actually reaches; context window; max output tokens; cost per 1M tokens and a cost tier), the admin's note on what the profile is good at, and whether it can be hot-swapped into this chat. Never returns secrets.",
+    promptSnippet: "list_llm_profiles — list the LLM profiles you can switch to, with their modalities, cost and strengths",
     promptGuidelines: [
       "Call list_llm_profiles before set_llm_config to get a valid profile id — never guess ids.",
+      "Choose by capability, not by name: a profile whose capabilities.input includes \"image\" for work involving screenshots or images, a reasoning/premium one for a hard reasoning step, a budget one for mechanical edits. The `strengths` note is the admin's own guidance — follow it.",
+      "Only pass a reasoningEffort that appears in that profile's capabilities.reasoningEfforts; anything higher is silently clamped.",
+      "Profiles marked switchable:false cannot be hot-swapped into this chat — don't try, the reason is in notSwitchableReason.",
     ],
     parameters: Type.Object({}),
     async execute(toolCallId, params: any, signal) {
       try {
         const { profiles, activeProfileId } = await listLlmProfiles();
-        const list = profiles.map((p) => ({ id: p.id, name: p.name, provider: p.llmProvider, model: p.llmModelId }));
+        // An env-configured deployment ignores per-request config entirely, so
+        // nothing is switchable — say so once here instead of letting the agent
+        // discover it by calling set_llm_config.
+        const serverConfigured = getLLMConfig().mode === "server-configured";
+        const list = profiles.map((p) => {
+          const blocked = serverConfigured
+            ? "This deployment's LLM is configured server-side, so profiles can't be switched."
+            : notSwitchableReason(p);
+          return {
+            id: p.id,
+            name: p.name,
+            provider: p.llmProvider,
+            model: p.llmModelId,
+            ...(p.strengths ? { strengths: p.strengths } : {}),
+            capabilities: describeProfileCapabilities(p),
+            switchable: !blocked,
+            ...(blocked ? { notSwitchableReason: blocked } : {}),
+          };
+        });
+        // The deployment pointer and this chat's model can differ: the agent may
+        // already have switched mid-run, and only the latter says what it is
+        // running right now.
+        const currentProfileId = getManagedSession().activeProfileId ?? null;
         return {
           content: [{
             type: "text" as const,
             text: list.length === 0
               ? "No LLM profiles are configured."
-              : JSON.stringify({ activeProfileId, profiles: list }, null, 2),
+              : JSON.stringify({ activeProfileId, currentProfileId, profiles: list }, null, 2),
           }],
           details: { count: list.length, activeProfileId },
         };
@@ -57,10 +111,11 @@ export function createLlmConfigTools(getManagedSession: () => ManagedSession): T
     promptSnippet: "set_llm_config — switch this chat's LLM profile and/or reasoning effort without stopping",
     promptGuidelines: [
       "Call list_llm_profiles first to obtain a valid `profile` id — do not guess ids.",
+      "Base the choice on that listing's `capabilities` and `strengths`: switch to a profile whose capabilities.input includes \"image\" before working with screenshots or images, to a reasoning/premium profile for a hard reasoning step, to a budget one for mechanical work.",
       "In the SAME message where you call set_llm_config, announce the switch to the user: which profile/model and reasoning effort you are moving to, and the purpose (the `reason` you pass). Then continue the task.",
       "Switching does NOT stop you — after the tool returns, keep working on the user's request on the new configuration.",
       "Only switch when it genuinely helps (a hard reasoning step, or to save cost/time on simple work) — don't switch gratuitously.",
-      "Reasoning effort options are medium, high, xhigh, max; the effort is clamped to what the target model supports.",
+      "Reasoning effort options are medium, high, xhigh, max; the effort is clamped to what the target model supports, so prefer one the profile lists in capabilities.reasoningEfforts.",
     ],
     parameters: Type.Object({
       reason: Type.String({

@@ -7546,12 +7546,18 @@ function ProfileSwitcherDropdown() {
           {profiles.map((p) => (
             <button
               key={p.id}
-              className={`thinking-dropdown-item${p.id === effectiveProfileId ? " active" : ""}`}
+              className={`thinking-dropdown-item profile-switcher-item${p.id === effectiveProfileId ? " active" : ""}`}
               onClick={() => switchProfile(p.id)}
               disabled={busy}
+              // The strengths note is what the admin wrote about when to reach
+              // for this profile — too long for the row, right for a tooltip.
+              title={p.strengths || p.name}
             >
-              <ArrowRightLeft size={13} />
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+              <ArrowRightLeft size={13} style={{ flexShrink: 0, marginTop: 2 }} />
+              <span className="profile-switcher-item-body">
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</span>
+                <ProfileCapabilityBadges capabilities={p.capabilities} compact t={t} />
+              </span>
             </button>
           ))}
           {error && (
@@ -8822,6 +8828,50 @@ function EnvironmentTab({ t, registerSave }) {
       {error && (<div style={{ color: "#dc2626", fontSize: 12 }}>{error}</div>)}
       {success && (<div style={{ color: "#166534", fontSize: 12 }}>{success}</div>)}
       {loadError && (<div style={{ color: "#dc2626", fontSize: 12 }}>{loadError}</div>)}
+    </div>
+  );
+}
+
+// A profile's derived model capabilities as badges — what the server computed
+// from the bundled model catalog (see src/model-capabilities.ts) and hands to
+// the agent via list_llm_profiles. Rendering the same facts here keeps the
+// admin's view and the agent's view in sync. `compact` drops the wordier
+// badges for the sidebar switcher, where space is tight.
+function ProfileCapabilityBadges({ capabilities, imageModelId, compact = false, t }) {
+  if (!capabilities) return null;
+  const ctx = formatTokenCount(capabilities.contextWindow);
+  const efforts = Array.isArray(capabilities.reasoningEfforts) ? capabilities.reasoningEfforts : [];
+  const vision = Array.isArray(capabilities.input) && capabilities.input.includes("image");
+  const tier = t(`settings.profiles.caps.tier.${capabilities.costTier || "unknown"}`);
+  return (
+    <div className="model-card-badges">
+      {ctx && <span className="mcp-server-badge mcp-server-badge-muted">{ctx} {t("settings.modelPicker.context")}</span>}
+      <span className={`mcp-server-badge${vision ? "" : " mcp-server-badge-muted"}`}>
+        {vision ? t("settings.profiles.caps.vision") : t("settings.profiles.caps.textOnly")}
+      </span>
+      {capabilities.reasoning
+        ? <span className="mcp-server-badge">{efforts.length ? t("settings.profiles.caps.efforts", { efforts: efforts.join(" · ") }) : t("settings.modelPicker.reasoning")}</span>
+        : <span className="mcp-server-badge mcp-server-badge-muted">{t("settings.profiles.caps.noReasoning")}</span>}
+      {tier && <span className="mcp-server-badge mcp-server-badge-muted">{tier}</span>}
+      {!compact && capabilities.costPerMTokUsd && (
+        <span className="mcp-server-badge mcp-server-badge-muted">
+          {t("settings.modelPicker.pricing", {
+            input: formatModelPrice(capabilities.costPerMTokUsd.input),
+            output: formatModelPrice(capabilities.costPerMTokUsd.output),
+          })}
+        </span>
+      )}
+      {/* Image generation follows the deployment settings, not a per-chat
+          profile switch — accurate to show the admin here, which is why the
+          agent's list_llm_profiles deliberately leaves it out. */}
+      {!compact && imageModelId && (
+        <span className="mcp-server-badge mcp-server-badge-muted">{t("settings.profiles.caps.imageModel", { model: imageModelId })}</span>
+      )}
+      {capabilities.metadataSource === "fallback" && (
+        <span className="mcp-server-badge mcp-server-badge-muted" title={t("settings.profiles.caps.estimatedTitle")}>
+          {t("settings.profiles.caps.estimated")}
+        </span>
+      )}
     </div>
   );
 }
@@ -10694,6 +10744,9 @@ function SettingsDialog({ open, onOpenChange }) {
   // renames apply on Save. Selecting NEW_PROFILE_ID in the dropdown starts a
   // new profile: the current form values + this name are created on Save.
   const [tempProfileName, setTempProfileName] = useState("");
+  // Admin's own note on what this profile is good for. Not connection config —
+  // it exists so the agent's list_llm_profiles can explain the fleet to itself.
+  const [tempProfileStrengths, setTempProfileStrengths] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileError, setProfileError] = useState(null);
   const [profileDeleteOpen, setProfileDeleteOpen] = useState(false);
@@ -10761,6 +10814,13 @@ function SettingsDialog({ open, onOpenChange }) {
     if (typeof s.imageUseLlmKey === "boolean") setTempImageUseLlmKey(s.imageUseLlmKey);
   };
 
+  // Load the editable per-profile fields (everything that isn't part of the
+  // shared LLM form) from a profile record, or clear them when passed nothing.
+  const hydrateProfileMeta = (p) => {
+    setTempProfileName(p ? p.name : "");
+    setTempProfileStrengths(p ? (p.strengths || "") : "");
+  };
+
   // Parse a token-override field: blank / non-positive → 0 ("no override").
   const toPosInt = (v) => {
     const n = parseInt(v, 10);
@@ -10770,6 +10830,7 @@ function SettingsDialog({ open, onOpenChange }) {
   // The profile-relevant slice of the current form values. Secrets may hold
   // the UNCHANGED sentinel — the server resolves it to the stored key.
   const currentProfileFields = () => ({
+    strengths: tempProfileStrengths.trim(),
     apiKey: tempKey,
     llmProvider: tempProvider,
     llmModelId: tempModelId.trim(),
@@ -10782,6 +10843,18 @@ function SettingsDialog({ open, onOpenChange }) {
     imageApiKey: tempImageKey,
     imageUseLlmKey: !!tempImageUseLlmKey,
   });
+
+  // Capabilities are computed server-side (it owns the model catalog), so they
+  // describe the profile as last saved. While the form points at a different
+  // provider/model the badges would be describing the wrong thing — hide them
+  // rather than mislead; Save brings them back, refreshed.
+  const selectedProfile = llmProfiles.find((p) => p.id === selectedProfileId);
+  const selectedProfileCapabilities =
+    selectedProfile
+    && selectedProfile.llmProvider === tempProvider
+    && selectedProfile.llmModelId === tempModelId.trim()
+      ? selectedProfile.capabilities
+      : null;
 
   // Everything the AI Model Config Save persists, as a comparable string.
   const llmSnapshot = JSON.stringify({
@@ -10815,8 +10888,7 @@ function SettingsDialog({ open, onOpenChange }) {
       if (userId) { try { await api(`/users/${userId}/reset-sessions`, { method: "POST", body: JSON.stringify({}) }); } catch {} }
       try { await reloadServerConfig(); } catch {}
       notifyLlmProfilesChanged();
-      const applied = llmProfiles.find((p) => p.id === id);
-      setTempProfileName(applied ? applied.name : "");
+      hydrateProfileMeta(llmProfiles.find((p) => p.id === id));
       setLlmBaseline(null); // applied profile is persisted server-side — clean
     } catch (err) {
       setProfileError(err?.message || String(err));
@@ -10871,12 +10943,11 @@ function SettingsDialog({ open, onOpenChange }) {
       const active = typeof r?.activeProfileId === "string" ? r.activeProfileId : "";
       setSelectedProfileId(active);
       initialProfileIdRef.current = active; // no spurious switch notice on Save
-      const activeProfile = profiles.find((p) => p.id === active);
-      setTempProfileName(activeProfile ? activeProfile.name : "");
+      hydrateProfileMeta(profiles.find((p) => p.id === active));
     } else if (has("aiModelConfig")) {
       setSelectedProfileId("");
       initialProfileIdRef.current = "";
-      setTempProfileName("");
+      hydrateProfileMeta(null);
     }
     if (has("mcpServers")) reloadMcpServers();
     if (has("aiModelConfig") && userId) {
@@ -10897,7 +10968,7 @@ function SettingsDialog({ open, onOpenChange }) {
       const r = await api(`/admin/llm-profiles/${selectedProfileId}`, { method: "DELETE" });
       setLlmProfiles(Array.isArray(r?.profiles) ? r.profiles : []);
       setSelectedProfileId("");
-      setTempProfileName("");
+      hydrateProfileMeta(null);
       setLlmBaseline(null); // deletion is persisted immediately — clean
       notifyLlmProfilesChanged();
     } catch (err) {
@@ -11193,7 +11264,7 @@ function SettingsDialog({ open, onOpenChange }) {
       setTempImageUseLlmKey(false);
       setSelectedProfileId("");
       initialProfileIdRef.current = "";
-      setTempProfileName("");
+      hydrateProfileMeta(null);
       setProfileError(null);
       setLlmSaved(false);
       setLlmSaveError(null);
@@ -11215,8 +11286,7 @@ function SettingsDialog({ open, onOpenChange }) {
             const active = typeof r?.activeProfileId === "string" ? r.activeProfileId : "";
             setSelectedProfileId(active);
             initialProfileIdRef.current = active;
-            const activeProfile = profiles.find((p) => p.id === active);
-            setTempProfileName(activeProfile ? activeProfile.name : "");
+            hydrateProfileMeta(profiles.find((p) => p.id === active));
             setLlmBaseline(null);
           })
           .catch(() => setLlmProfiles([]));
@@ -11664,7 +11734,7 @@ function SettingsDialog({ open, onOpenChange }) {
                       if (id === NEW_PROFILE_ID) {
                         // Start a new profile from the current form values;
                         // it is created when the section is saved.
-                        setTempProfileName("");
+                        hydrateProfileMeta(null);
                         return;
                       }
                       if (id && id !== prev) applyProfile(id, prev);
@@ -11726,6 +11796,34 @@ function SettingsDialog({ open, onOpenChange }) {
                     disabled={profileBusy}
                   />
                 </label>
+              )}
+              {selectedProfileId && (
+                <label className="modal-label">
+                  {t("settings.profiles.strengths")}
+                  <textarea
+                    className="modal-input"
+                    rows={3}
+                    // Matches STRENGTHS_MAX_CHARS in src/llm-profiles.ts, which
+                    // rejects anything longer rather than truncating it.
+                    maxLength={500}
+                    style={{ resize: "vertical" }}
+                    value={tempProfileStrengths}
+                    onChange={(e) => setTempProfileStrengths(e.target.value)}
+                    placeholder={t("settings.profiles.strengthsPlaceholder")}
+                    disabled={profileBusy}
+                  />
+                  <span style={{ color: "var(--text-muted)", fontSize: 11 }}>{t("settings.profiles.strengthsHint")}</span>
+                </label>
+              )}
+              {/* What the model itself can do — derived server-side from the
+                  bundled catalog, and the same facts the agent receives from
+                  list_llm_profiles. Read-only: it follows provider/model. */}
+              {selectedProfileCapabilities && (
+                <ProfileCapabilityBadges
+                  capabilities={selectedProfileCapabilities}
+                  imageModelId={selectedProfile?.imageModelId}
+                  t={t}
+                />
               )}
               {profileError && (
                 <div className="skill-editor-error" role="alert">

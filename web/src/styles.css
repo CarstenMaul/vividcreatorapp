@@ -4915,6 +4915,30 @@ button.project-badge:disabled { opacity: 0.5; cursor: default; }
 .profile-switcher-menu {
   left: auto;
   right: 0;
+  /* Wider than the 180px default so a row of capability badges fits on one
+     or two lines instead of one badge per line. */
+  min-width: 260px;
+}
+/* Two-line rows: the profile name, and the capability badges underneath. The
+   base .thinking-dropdown-item centres a single line, so opt out of that. */
+.profile-switcher-item {
+  align-items: flex-start;
+}
+.profile-switcher-item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.profile-switcher-item .mcp-server-badge {
+  font-size: 9px;
+  padding: 0 4px;
+}
+/* The active row paints itself accent-on-white; the badges' own accent tint
+   would disappear into it, so invert them for that state. */
+.profile-switcher-item.active .mcp-server-badge {
+  background: rgba(255, 255, 255, 0.22);
+  color: #fff;
 }
 
 .project-lock-overlay {

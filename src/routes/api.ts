@@ -240,6 +240,7 @@ import {
   redactLlmProfile,
   type LlmProfile,
 } from "../llm-profiles.js";
+import { describeProfileCapabilities } from "../model-capabilities.js";
 import {
   listVcsProfiles,
   createVcsProfile,
@@ -459,7 +460,7 @@ apiRouter.post("/admin/vca-settings/import", async (req: Request, res: Response)
     };
     if (applied.includes("profiles")) {
       const data = await listLlmProfiles();
-      out.profiles = data.profiles.map(redactLlmProfile);
+      out.profiles = data.profiles.map(toClientProfile);
       out.activeProfileId = data.activeProfileId;
     }
     res.json(out);
@@ -478,6 +479,13 @@ apiRouter.post("/admin/vca-settings/import", async (req: Request, res: Response)
 // follow the provider automatically). Secrets in create/update bodies may be
 // the UNCHANGED sentinel — resolved server-side so keys never round-trip.
 
+// The client view of a profile: secrets masked, plus the capabilities derived
+// from pi's catalog (offline — see src/model-capabilities.ts) so Settings and
+// the sidebar switcher can show modalities/context/cost without a second call.
+function toClientProfile(p: LlmProfile) {
+  return { ...redactLlmProfile(p), capabilities: describeProfileCapabilities(p) };
+}
+
 function pickProfileFields(body: Record<string, unknown>): Omit<LlmProfile, "id"> {
   const str = (k: string) => (typeof body[k] === "string" ? body[k] as string : "");
   const num = (k: string) => {
@@ -486,6 +494,7 @@ function pickProfileFields(body: Record<string, unknown>): Omit<LlmProfile, "id"
   };
   return {
     name: str("name"),
+    strengths: str("strengths"),
     apiKey: str("apiKey"),
     llmProvider: str("llmProvider"),
     llmModelId: str("llmModelId"),
@@ -507,7 +516,7 @@ apiRouter.get("/admin/llm-profiles", async (req: Request, res: Response) => {
   }
   try {
     const data = await listLlmProfiles();
-    res.json({ profiles: data.profiles.map(redactLlmProfile), activeProfileId: data.activeProfileId });
+    res.json({ profiles: data.profiles.map(toClientProfile), activeProfileId: data.activeProfileId });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
@@ -525,7 +534,7 @@ apiRouter.post("/admin/llm-profiles", async (req: Request, res: Response) => {
       apiKey: stored.apiKey,
       imageApiKey: stored.imageApiKey,
     });
-    res.json({ profiles: data.profiles.map(redactLlmProfile), activeProfileId: data.activeProfileId });
+    res.json({ profiles: data.profiles.map(toClientProfile), activeProfileId: data.activeProfileId });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -538,7 +547,7 @@ apiRouter.put("/admin/llm-profiles/:profileId", async (req: Request, res: Respon
   }
   try {
     const data = await updateLlmProfile(param(req, "profileId"), pickProfileFields(req.body || {}));
-    res.json({ profiles: data.profiles.map(redactLlmProfile), activeProfileId: data.activeProfileId });
+    res.json({ profiles: data.profiles.map(toClientProfile), activeProfileId: data.activeProfileId });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -551,7 +560,7 @@ apiRouter.delete("/admin/llm-profiles/:profileId", async (req: Request, res: Res
   }
   try {
     const data = await deleteLlmProfile(param(req, "profileId"));
-    res.json({ profiles: data.profiles.map(redactLlmProfile), activeProfileId: data.activeProfileId });
+    res.json({ profiles: data.profiles.map(toClientProfile), activeProfileId: data.activeProfileId });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
