@@ -10,7 +10,7 @@ import { bundledBashExe } from "./bundled-runtime.js";
 import { git, tryGit } from "./exec-utils.js";
 import { acquireLease, releaseLease, describeSelf, leasingEnabled } from "./project-lock.js";
 import { resolveWorkspaceRealRoot, buildHardenedToolDefinitions } from "./agent-sandbox.js";
-import { atomicWriteJson, copyDir } from "./fs-utils.js";
+import { atomicWriteJson, atomicWriteText, copyDir } from "./fs-utils.js";
 import { addProjectCost, readProjectCostIfExists } from "./project-cost.js";
 import { execFile } from "child_process";
 import { promisify } from "util";
@@ -22,6 +22,7 @@ import os from "os";
 import { stringify as yamlStringify } from "yaml";
 import { getSystemPrompt, getSystemPromptVersion } from "./system-prompt.js";
 import { createRequirementTools } from "./requirement-tools.js";
+import { createMemoryTools } from "./memory-tools.js";
 import { createSkillTools } from "./skill-tools.js";
 import { createLlmConfigTools } from "./llm-config-tools.js";
 import { createWebFetchTool } from "./webfetch-tool.js";
@@ -51,7 +52,7 @@ import { encryptSecret } from "./secret-crypto.js";
 import { UNCHANGED_SECRET_SENTINEL } from "./auth-config.js";
 import { readMcpServers } from "./mcp-servers.js";
 import { loadMcpToolsForAllEnabled } from "./mcp-client.js";
-import { userPaths, projectPaths, listUserDirs, PROJECT_ICON_FILENAME } from "./paths.js";
+import { userPaths, projectPaths, listUserDirs, PROJECT_ICON_FILENAME, PROJECT_MEMORY_FILENAME } from "./paths.js";
 import { loadPublicUser, createEntraUser, type PublicUser } from "./user-store.js";
 
 const execFileAsync = promisify(execFile);
@@ -852,6 +853,155 @@ export async function deleteRequirement(userId: string, projectId: string, reqId
   await atomicWriteJson(await getRequirementsPath(userId, projectId), requirements.filter(r => r.id !== reqId), 2);
 }
 
+// ─── Project memory ──────────────────────────────────────────
+//
+// Durable, per-project knowledge the agent accumulates across chats, stored as
+// Markdown in <workspace>/project.md and injected into the system prompt as a
+// <project_memory> block. It lives in the SYSTEM prompt (not the message array)
+// precisely so context compaction can never summarize it away.
+//
+// The file is deliberately un-prefixed — see projectPaths.projectMemory. Writes
+// go through the memory tools (memory-tools.ts) or the /memory routes; both land
+// here so the size cap, the prompt cache and the SSE broadcast stay in one place.
+
+/** Chars of memory injected into every request. ~2k tokens — a budget, not a log. */
+export const PROJECT_MEMORY_MAX_CHARS = 8000;
+/** Fraction of the budget above which tool results start nagging the model to prune. */
+export const PROJECT_MEMORY_WARN_RATIO = 0.75;
+/** Fixed heading set — an open-ended one fragments an 8 KB file into twenty sections. */
+export const PROJECT_MEMORY_SECTIONS = ["Decisions", "Conventions", "Constraints", "Integrations", "Preferences", "Notes"] as const;
+export type ProjectMemorySection = (typeof PROJECT_MEMORY_SECTIONS)[number];
+
+export class ProjectMemoryTooLargeError extends Error {
+  code = "PROJECT_MEMORY_TOO_LARGE";
+  used: number;
+  max: number;
+  constructor(used: number) {
+    super(`Project memory is ${used.toLocaleString("en-US")} characters, over the ${PROJECT_MEMORY_MAX_CHARS.toLocaleString("en-US")} character limit.`);
+    this.used = used;
+    this.max = PROJECT_MEMORY_MAX_CHARS;
+  }
+}
+
+// workspacePath → memory text. Needed because DefaultResourceLoader's
+// systemPromptOverride is SYNCHRONOUS, so the file must already be in memory by
+// the time the prompt is composed. Keyed by the owner-resolved workspace path so
+// every session for the same physical project (including shared/linked ones)
+// shares one entry.
+const projectMemoryCache = new Map<string, string>();
+
+async function getProjectMemoryPath(userId: string, projectId: string): Promise<string> {
+  return projectPaths.projectMemory(await resolveOwnerUserId(userId, projectId), projectId);
+}
+
+/** Raw read straight off a workspace path. "" when absent — never throws on ENOENT. */
+async function readProjectMemoryRaw(workspacePath: string): Promise<string> {
+  try {
+    return (await fs.readFile(path.join(workspacePath, PROJECT_MEMORY_FILENAME), "utf-8")).trim();
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return "";
+    throw err;
+  }
+}
+
+export async function readProjectMemory(userId: string, projectId: string): Promise<string> {
+  try {
+    return (await fs.readFile(await getProjectMemoryPath(userId, projectId), "utf-8")).trim();
+  } catch {
+    return "";
+  }
+}
+
+export function projectMemoryUsage(text: string): { used: number; max: number; percent: number; warn: boolean } {
+  const used = text.length;
+  return {
+    used,
+    max: PROJECT_MEMORY_MAX_CHARS,
+    percent: Math.round((used / PROJECT_MEMORY_MAX_CHARS) * 100),
+    warn: used >= PROJECT_MEMORY_MAX_CHARS * PROJECT_MEMORY_WARN_RATIO,
+  };
+}
+
+/**
+ * The usage line every memory tool appends to its result. The model only prunes
+ * if it can see the pressure building, so this rides along on every call — not
+ * just the one that finally overflows.
+ */
+export function formatProjectMemoryUsage(text: string): string {
+  const u = projectMemoryUsage(text);
+  const base = `Memory: ${u.used.toLocaleString("en-US")} / ${u.max.toLocaleString("en-US")} characters (${u.percent}%)`;
+  return u.warn ? `${base} — prune with rewrite_project_memory before recording more.` : `${base}.`;
+}
+
+/** Replace project memory wholesale. Rejects (never truncates) over the cap. */
+export async function writeProjectMemory(userId: string, projectId: string, content: string): Promise<string> {
+  const next = (content ?? "").trim();
+  if (next.length > PROJECT_MEMORY_MAX_CHARS) throw new ProjectMemoryTooLargeError(next.length);
+  const memoryPath = await getProjectMemoryPath(userId, projectId);
+  await atomicWriteText(memoryPath, next ? `${next}\n` : "");
+  // Keep the sync prompt cache in step; sessions pick it up at their next
+  // prompt via syncProjectMemoryForSession.
+  projectMemoryCache.set(path.dirname(memoryPath), next);
+  broadcastSSEEvent(userId, projectId, "memory_updated", { content: next, ...projectMemoryUsage(next) });
+  return next;
+}
+
+const MEMORY_HEADING_RE = /^##\s+(.+?)\s*$/;
+
+/** Append bullets under a `## Section` heading, creating the file/heading as needed. */
+function insertFactsIntoMemory(existing: string, facts: string[], section: string): string {
+  const bullets = facts.map((f) => `- ${f.trim().replace(/\s+/g, " ")}`).filter((b) => b !== "-");
+  if (!bullets.length) return existing;
+  if (!existing.trim()) return `# Project Memory\n\n## ${section}\n${bullets.join("\n")}`;
+
+  const lines = existing.split(/\r?\n/);
+  const sectionStart = lines.findIndex((l) => {
+    const m = l.match(MEMORY_HEADING_RE);
+    return !!m && m[1].toLowerCase() === section.toLowerCase();
+  });
+  if (sectionStart === -1) {
+    return `${lines.join("\n").trimEnd()}\n\n## ${section}\n${bullets.join("\n")}`;
+  }
+  // Insert at the end of this section — just before the next `## ` heading (or
+  // EOF), stepping back over the blank line that separates sections.
+  let insertAt = lines.length;
+  for (let i = sectionStart + 1; i < lines.length; i++) {
+    if (MEMORY_HEADING_RE.test(lines[i])) { insertAt = i; break; }
+  }
+  while (insertAt > sectionStart + 1 && lines[insertAt - 1].trim() === "") insertAt--;
+  lines.splice(insertAt, 0, ...bullets);
+  return lines.join("\n").trimEnd();
+}
+
+export async function appendProjectMemoryFacts(
+  userId: string,
+  projectId: string,
+  facts: string[],
+  section: string,
+): Promise<string> {
+  const existing = await readProjectMemory(userId, projectId);
+  return writeProjectMemory(userId, projectId, insertFactsIntoMemory(existing, facts, section));
+}
+
+/**
+ * Append the <project_memory> block to a base system prompt. Synchronous by
+ * necessity (DefaultResourceLoader.systemPromptOverride), so it reads the cache
+ * rather than the disk.
+ *
+ * The clamp here is independent of the write cap: project.md is committed, so a
+ * `git pull` or an external editor can drop an arbitrarily large file into the
+ * workspace, and that must not bloat every request. The marker doubles as the
+ * repair instruction.
+ */
+function composeMemoryBlock(base: string, workspacePath: string): string {
+  const memory = projectMemoryCache.get(workspacePath) ?? "";
+  if (!memory) return base;
+  const body = memory.length > PROJECT_MEMORY_MAX_CHARS
+    ? `${memory.slice(0, PROJECT_MEMORY_MAX_CHARS)}\n\n[project memory truncated at ${PROJECT_MEMORY_MAX_CHARS} characters — prune it with rewrite_project_memory]`
+    : memory;
+  return `${base}\n\n<project_memory>\n${body}\n</project_memory>`;
+}
+
 function parseFrontmatterFields(frontmatter: string): Record<string, string> {
   const lines = frontmatter.split(/\r?\n/);
   const out: Record<string, string> = {};
@@ -1123,6 +1273,33 @@ export async function reseedAllSessions(): Promise<void> {
   console.log(`[skills] Reseeded ${sessions.size} active session(s)`);
 }
 
+/**
+ * Reconcile this session's system prompt with project.md on disk. Called at the
+ * START of every prompt, never during one.
+ *
+ * Comparing against disk (rather than broadcasting a dirty flag on write) also
+ * catches memory changes VCA didn't make — the Memory tab's PUT, an external
+ * editor, a `git pull`, or the agent reaching for the generic write tool anyway.
+ *
+ * session.reload() is deliberately NOT called from the write path: it swaps
+ * agent.state.tools/systemPrompt mid-flight (pi's own note on
+ * setActiveToolsByName is "changes take effect on the next agent turn") and
+ * re-runs resetApiProviders(), which touches the process-global provider
+ * registry shared with every other streaming session. Deferring to the turn
+ * boundary makes all of that a non-issue. Within the turn that recorded a fact
+ * the model already knows it — it's the tool result.
+ */
+async function syncProjectMemoryForSession(managed: ManagedSession): Promise<void> {
+  const text = await readProjectMemoryRaw(managed.workspacePath);
+  projectMemoryCache.set(managed.workspacePath, text);
+  if (managed.appliedMemory === text) return;
+  // Streaming/compacting means a turn is still in flight (a followUp prompt, or
+  // a queued message) — leave it for the next one.
+  if (managed.session.isStreaming || managed.session.isCompacting) return;
+  await managed.session.reload();
+  managed.appliedMemory = text;
+}
+
 // Per-project active skills
 async function getActiveSkillsPath(userId: string, projectId: string): Promise<string> {
   return projectPaths.activeSkills(await resolveOwnerUserId(userId, projectId), projectId);
@@ -1377,6 +1554,11 @@ export interface ManagedSession {
   // instead of losing the partial text/thinking. Cleared at message_end/agent_end.
   streamingMessage?: Extract<AgentSessionEvent, { type: "message_start" }>["message"];
   currentMessageStartTime?: number;
+  // The exact project-memory text currently baked into this session's system
+  // prompt. Compared against disk at the start of every prompt; a mismatch
+  // triggers session.reload(), which re-applies systemPromptOverride. See
+  // syncProjectMemoryForSession.
+  appliedMemory?: string;
 }
 
 type PersistedChatMessage = {
@@ -4874,23 +5056,27 @@ async function createSessionLocked(userId: string, projectId: string, chatId: st
   }
 
   let systemPromptForSession = getSystemPrompt();
-  // Template-author per-project instructions appended first; user-editable project memory wins by being last.
+  // Template-author per-project instructions appended first; user-editable
+  // project memory wins by being last (appended by systemPromptOverride below).
   const tplInstructions = await readVcaHook(workspacePath, "instructions");
   if (tplInstructions) {
     systemPromptForSession = `${systemPromptForSession}\n\n<project_instructions>\n${tplInstructions}\n</project_instructions>`;
   }
-  try {
-    const memory = (await fs.readFile(path.join(workspacePath, "project.md"), "utf-8")).trim();
-    if (memory) {
-      systemPromptForSession = `${systemPromptForSession}\n\n<project_memory>\n${memory}\n</project_memory>`;
-    }
-  } catch { /* no project.md yet — fine */ }
+  // Seed the sync cache the override reads from, so session creation and every
+  // later session.reload() go through one code path.
+  const initialMemory = await readProjectMemoryRaw(workspacePath);
+  projectMemoryCache.set(workspacePath, initialMemory);
 
   const resourceLoader = new DefaultResourceLoader({
     cwd: workspacePath,
     agentDir: getAgentDir(),
     settingsManager,
     systemPrompt: systemPromptForSession,
+    // Project memory is appended here rather than baked into the string above
+    // so it is re-composed on EVERY loader.reload() — that is what lets a fact
+    // recorded in one chat reach the others without a session tear-down. A
+    // materialized string would just re-inject the same stale text.
+    systemPromptOverride: (base) => composeMemoryBlock(base ?? "", workspacePath),
     // Cross-project isolation: pi's context-file discovery walks EVERY
     // ancestor of cwd — WORKSPACES_ROOT/<userId>/ (shared across the user's
     // projects) and WORKSPACES_ROOT/ (shared across ALL users) — plus the
@@ -4941,6 +5127,7 @@ async function createSessionLocked(userId: string, projectId: string, chatId: st
   });
   const customTools: ToolDefinition[] = [...hardenedTools, askQuestionTool, renameChatTool, serverLogTool, restartAppProcessTool, createWaitTool(), startNewChatTool];
   customTools.push(...createRequirementTools(() => managedRef!));
+  customTools.push(...createMemoryTools(() => managedRef!));
   customTools.push(...createSkillTools(() => managedRef!));
   // Let the agent switch its own LLM profile / reasoning effort mid-run (this
   // chat's session only) without stopping — see llm-config-tools.ts.
@@ -4999,6 +5186,7 @@ async function createSessionLocked(userId: string, projectId: string, chatId: st
     userDisplayTexts: [],
     userAuthors: [],
     thinkingLevel,
+    appliedMemory: initialMemory,
   };
   managedRef = managed;
   await hydrateManagedSessionDisplayMetadata(managed);
@@ -5089,6 +5277,15 @@ export async function sendPrompt(userId: string, projectId: string, chatId: stri
   try {
     const managed = await getOrCreateSession(userId, projectId, chatId, apiKey, llmConfig);
     sessionReady = true;
+
+    // Pull in any project-memory change (this chat's own writes last turn,
+    // another chat's, the Memory tab, or an external edit) before the turn
+    // starts. Best-effort: a refresh failure must never abort the prompt.
+    try {
+      await syncProjectMemoryForSession(managed);
+    } catch (err) {
+      console.warn(`[memory] refresh failed for ${projectId}/${chatId}:`, err);
+    }
 
     // If a previous turn is still blocked on an unanswered ask_question or an
     // unfinished preview screenshot (user reloaded the page or ignored the

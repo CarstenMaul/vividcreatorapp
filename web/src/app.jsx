@@ -1587,6 +1587,15 @@ function useSSE(projectId, chatId, userId, sessionEpoch, dispatch, refreshPrevie
       } catch {}
     });
 
+    es.addEventListener("memory_updated", (e) => {
+      // Re-dispatch as a DOM event so the Architect View's Memory tab can pick
+      // up the agent's writes without threading another pulse flag through
+      // AppContext (see MemoryTabContent).
+      try {
+        window.dispatchEvent(new CustomEvent("vca-memory-updated", { detail: JSON.parse(e.data) }));
+      } catch {}
+    });
+
     es.addEventListener("deployment_updated", (e) => {
       try {
         const { mermaid } = JSON.parse(e.data);
@@ -6208,6 +6217,135 @@ function RequirementsTabContent({ projectId, userId, t }) {
   );
 }
 
+// ─── Memory Tab Content ──────────────────────────────────────
+function MemoryTabContent({ projectId, userId, t }) {
+  const [content, setContent] = useState("");
+  const [saved, setSaved] = useState("");
+  const [max, setMax] = useState(8000);
+  const [warnRatio, setWarnRatio] = useState(0.75);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [confirmClear, setConfirmClear] = useState(false);
+  const savedRef = useRef("");
+
+  useEffect(() => { savedRef.current = saved; }, [saved]);
+
+  useEffect(() => {
+    if (!projectId) return;
+    setLoading(true);
+    api(`/projects/${projectId}/memory?userId=${userId}`)
+      .then(r => {
+        setContent(r.content || "");
+        setSaved(r.content || "");
+        if (r.max) setMax(r.max);
+        if (r.warnRatio) setWarnRatio(r.warnRatio);
+      })
+      .catch(() => { setContent(""); setSaved(""); })
+      .finally(() => setLoading(false));
+  }, [projectId, userId]);
+
+  // The agent writes memory mid-turn. Adopt its version unless the user has
+  // unsaved edits of their own — silently overwriting those would be worse
+  // than showing a stale document.
+  useEffect(() => {
+    const onUpdate = (e) => {
+      const next = typeof e.detail?.content === "string" ? e.detail.content : null;
+      if (next === null) return;
+      setContent(prev => (prev === savedRef.current ? next : prev));
+      setSaved(next);
+    };
+    window.addEventListener("vca-memory-updated", onUpdate);
+    return () => window.removeEventListener("vca-memory-updated", onUpdate);
+  }, []);
+
+  const used = content.length;
+  const over = used > max;
+  const near = !over && used >= max * warnRatio;
+  const dirty = content !== saved;
+
+  const save = async (next) => {
+    setSaving(true);
+    setError("");
+    try {
+      const r = await api(`/projects/${projectId}/memory`, {
+        method: "PUT",
+        body: JSON.stringify({ userId, content: next != null ? next : content }),
+      });
+      setContent(r.content || "");
+      setSaved(r.content || "");
+    } catch (err) {
+      setError(err?.message || t("memory.saveFailed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", padding: 16, gap: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 600, fontSize: 14, color: "var(--text-primary)" }}>
+          <Brain size={15} /> {t("memory.title")}
+        </span>
+        <button className="btn-secondary btn-sm" disabled={saving || !saved} onClick={() => setConfirmClear(true)}>
+          <Trash2 size={14} /> {t("memory.clear")}
+        </button>
+      </div>
+      <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>{t("memory.description")}</div>
+
+      {loading ? (
+        <div style={{ textAlign: "center", padding: 32, color: "var(--text-muted)" }}>Loading...</div>
+      ) : (
+        <>
+          <textarea
+            value={content}
+            onChange={e => setContent(e.target.value)}
+            placeholder={t("memory.empty")}
+            spellCheck={false}
+            style={{
+              flex: 1, minHeight: 200, width: "100%", padding: "10px 12px", borderRadius: 8, resize: "none",
+              border: `1px solid ${over ? "var(--danger)" : "var(--border)"}`,
+              background: "var(--bg-primary)", color: "var(--text-primary)",
+              fontFamily: "monospace", fontSize: 12, lineHeight: 1.6,
+            }}
+          />
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span style={{ fontSize: 11, color: over ? "var(--danger)" : near ? "var(--accent)" : "var(--text-muted)" }}>
+              {t("memory.usage", { used: used.toLocaleString(), max: max.toLocaleString() })}
+            </span>
+            {over && <span style={{ fontSize: 11, color: "var(--danger)" }}>{t("memory.overLimit", { over: (used - max).toLocaleString() })}</span>}
+            {near && <span style={{ fontSize: 11, color: "var(--accent)" }}>{t("memory.nearLimit")}</span>}
+            {error && <span style={{ fontSize: 11, color: "var(--danger)" }}>{error}</span>}
+            <div style={{ flex: 1 }} />
+            {dirty && (
+              <button className="btn-secondary btn-sm" disabled={saving} onClick={() => { setContent(saved); setError(""); }}>
+                <X size={14} /> {t("common.cancel")}
+              </button>
+            )}
+            <button className="btn-primary btn-sm" disabled={saving || over || !dirty} onClick={() => save()}>
+              <Save size={14} /> {saving ? "..." : t("common.save")}
+            </button>
+          </div>
+        </>
+      )}
+
+      {confirmClear && (
+        <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12, background: "var(--bg-secondary)" }}>
+          <div style={{ fontSize: 12, color: "var(--text-primary)", marginBottom: 8 }}>{t("memory.clearConfirm")}</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn-primary btn-sm" disabled={saving} onClick={async () => { await save(""); setConfirmClear(false); }}>
+              <Trash2 size={14} /> {t("memory.clear")}
+            </button>
+            <button className="btn-secondary btn-sm" onClick={() => setConfirmClear(false)}>
+              <X size={14} /> {t("common.cancel")}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Architect View (back of flip) ──────────────────────────
 function ArchitectView({ onClose }) {
   const { state, userId, useCaseMermaid, setUseCaseMermaid, deploymentMermaid, setDeploymentMermaid, componentMermaid, setComponentMermaid, devFocus, setDevFocus, serverConfig, t } = useContext(AppContext);
@@ -6266,7 +6404,8 @@ function ArchitectView({ onClose }) {
         }
         return;
       }
-      if (activeTab === "requirements") return;
+      // These tabs own their own persistence (their own Save buttons).
+      if (activeTab === "requirements" || activeTab === "memory") return;
       const validConnections = data.connections.filter(c =>
         data.actors.some(a => a.id === c.actorId) && data.useCases.some(u => u.id === c.useCaseId)
       );
@@ -6301,9 +6440,12 @@ function ArchitectView({ onClose }) {
         <button className={`diagram-tab${activeTab === "activity" ? " active" : ""}`} onClick={() => setActiveTab("activity")}>{t("diagram.tabActivity")}</button>
         <button className={`diagram-tab${activeTab === "er" ? " active" : ""}`} onClick={() => setActiveTab("er")}>{t("diagram.tabER")}</button>
         <button className={`diagram-tab${activeTab === "requirements" ? " active" : ""}`} onClick={() => setActiveTab("requirements")}>{t("diagram.tabRequirements")}</button>
+        <button className={`diagram-tab${activeTab === "memory" ? " active" : ""}`} onClick={() => setActiveTab("memory")}>{t("diagram.tabMemory")}</button>
       </div>
       <div className="architect-body">
-        {activeTab === "requirements" ? (
+        {activeTab === "memory" ? (
+          <MemoryTabContent projectId={state.currentProjectId} userId={userId} t={t} />
+        ) : activeTab === "requirements" ? (
           <RequirementsTabContent projectId={state.currentProjectId} userId={userId} t={t} />
         ) : activeTab === "activity" ? (
           <ActivityTabContent
@@ -7243,6 +7385,14 @@ const vFlag = (c1, c2, c3) => () => (
     <rect width="2" height="4" x="0" fill={c1}/><rect width="2" height="4" x="2" fill={c2}/><rect width="2" height="4" x="4" fill={c3}/>
   </svg>
 );
+// Points list for a five-pointed star (used by the Chinese flag). Angles run
+// from the top so the star points straight up.
+const starPoints = (cx, cy, r) =>
+  Array.from({ length: 10 }, (_, i) => {
+    const a = ((-90 + i * 36) * Math.PI) / 180;
+    const rr = i % 2 === 0 ? r : r * 0.382;
+    return `${(cx + rr * Math.cos(a)).toFixed(2)},${(cy + rr * Math.sin(a)).toFixed(2)}`;
+  }).join(" ");
 
 const FLAG_SVG = {
   en: () => (
@@ -7314,19 +7464,85 @@ const FLAG_SVG = {
     </svg>
   ),
   et: hFlag("#0072CE", "#000", "#fff"),
+  ru: hFlag("#fff", "#0039A6", "#D52B1E"),
+  zh: () => (
+    <svg width="18" height="13" viewBox="0 0 30 20" style={{ borderRadius: 2, display: "block" }}>
+      <rect width="30" height="20" fill="#EE1C25"/>
+      <polygon points={starPoints(5, 5, 3)} fill="#FFDE00"/>
+      <polygon points={starPoints(10.5, 2, 1.1)} fill="#FFDE00"/>
+      <polygon points={starPoints(12.8, 4.4, 1.1)} fill="#FFDE00"/>
+      <polygon points={starPoints(12.8, 7.6, 1.1)} fill="#FFDE00"/>
+      <polygon points={starPoints(10.5, 10, 1.1)} fill="#FFDE00"/>
+    </svg>
+  ),
+  ja: () => (
+    <svg width="18" height="13" viewBox="0 0 30 20" style={{ borderRadius: 2, display: "block" }}>
+      <rect width="30" height="20" fill="#fff"/>
+      <circle cx="15" cy="10" r="6" fill="#BC002D"/>
+    </svg>
+  ),
+  ko: () => (
+    <svg width="18" height="13" viewBox="0 0 30 20" style={{ borderRadius: 2, display: "block" }}>
+      <rect width="30" height="20" fill="#fff"/>
+      {/* Taegeuk: full red disc with the lower comma painted blue over it. */}
+      <circle cx="15" cy="10" r="5" fill="#CD2E3A"/>
+      <path d="M10 10a2.5 2.5 0 0 1 5 0 2.5 2.5 0 0 0 5 0 5 5 0 0 1-10 0z" fill="#0047A0"/>
+      {/* Trigrams, simplified to three solid bars each — the yin gaps are
+          sub-pixel at this size. Each group is rotated so the bars stack
+          along the diagonal towards the centre. */}
+      <g fill="#000">
+        {[[5.5, 4.5, -60], [24.5, 4.5, 60], [5.5, 15.5, -120], [24.5, 15.5, 120]].map(([x, y, rot], i) => (
+          <g key={i} transform={`translate(${x} ${y}) rotate(${rot})`}>
+            <rect x="-2.4" y="-1.55" width="4.8" height="0.8"/>
+            <rect x="-2.4" y="-0.4" width="4.8" height="0.8"/>
+            <rect x="-2.4" y="0.75" width="4.8" height="0.8"/>
+          </g>
+        ))}
+      </g>
+    </svg>
+  ),
+  hi: () => (
+    <svg width="18" height="13" viewBox="0 0 30 20" style={{ borderRadius: 2, display: "block" }}>
+      <rect width="30" height="6.67" y="0" fill="#FF9933"/><rect width="30" height="6.67" y="6.67" fill="#fff"/><rect width="30" height="6.66" y="13.34" fill="#138808"/>
+      <circle cx="15" cy="10" r="2.6" fill="none" stroke="#000080" strokeWidth="0.7"/>
+      <circle cx="15" cy="10" r="0.6" fill="#000080"/>
+    </svg>
+  ),
+  // Arabic is spoken across many countries, so the switcher shows the letter
+  // ʿayn on a pan-Arab green field instead of picking one nation's flag.
+  ar: () => (
+    <svg width="18" height="13" viewBox="0 0 30 20" style={{ borderRadius: 2, display: "block" }}>
+      <rect width="30" height="20" fill="#046A38"/>
+      <text x="15" y="10.5" textAnchor="middle" dominantBaseline="central" fontSize="15" fill="#fff">ع</text>
+    </svg>
+  ),
 };
 
 const LANGS = [
   { code: "en", label: "English" },
   { code: "de", label: "Deutsch" },
   { code: "fr", label: "Français" },
+  { code: "es", label: "Español" },
   { code: "it", label: "Italiano" },
+  { code: "pt", label: "Português" },
   { code: "pl", label: "Polski" },
+  { code: "ru", label: "Русский" },
+  { code: "ar", label: "العربية", rtl: true },
+  { code: "hi", label: "हिन्दी" },
+  { code: "zh", label: "简体中文" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
 ];
+
+// Whether a language reads right-to-left. Drives the document `dir`, which is
+// what flips text alignment, the caret and native controls for Arabic.
+function isRtlLang(code) {
+  return LANGS.some((l) => l.code === code && l.rtl);
+}
 
 // The desktop/browser locale, mapped onto a language VCA actually ships. Walks
 // the user's ordered preference list and matches on the primary subtag, so
-// "de-AT" picks German and "pt-BR" falls through to the next candidate;
+// "de-AT" picks German and "zh-TW" picks the Simplified Chinese we ship;
 // English when nothing matches. Used as the startup default and, on a user's
 // very first launch, written to their prefs as the initial choice.
 function detectPreferredLang() {
@@ -17862,6 +18078,15 @@ export function App() {
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
   }, [theme]);
+
+  // Apply the UI language to the document: `lang` gives the browser the right
+  // font fallbacks and hyphenation for CJK/Arabic/Devanagari, `dir` flips the
+  // whole tree to RTL for Arabic. Nothing paints before React mounts, so this
+  // does not need the pre-mount script treatment the theme gets in index.html.
+  useEffect(() => {
+    document.documentElement.setAttribute("lang", lang);
+    document.documentElement.setAttribute("dir", isRtlLang(lang) ? "rtl" : "ltr");
+  }, [lang]);
 
   const toggleTheme = useCallback(() => {
     setTheme(theme === "dark" ? "light" : "dark");

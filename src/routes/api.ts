@@ -113,6 +113,11 @@ import {
   createRequirement,
   updateRequirement,
   deleteRequirement,
+  readProjectMemory,
+  writeProjectMemory,
+  projectMemoryUsage,
+  ProjectMemoryTooLargeError,
+  PROJECT_MEMORY_WARN_RATIO,
   answerQuestion,
   resolveScreenshotResult,
   reseedAllSessions,
@@ -3955,6 +3960,44 @@ apiRouter.delete("/projects/:projectId/requirements/:reqId", async (req: Request
     const userId = req.body?.userId || query(req, "userId");
     if (!userId) { res.status(400).json({ error: "userId is required" }); return; }
     await deleteRequirement(userId, param(req, "projectId"), param(req, "reqId"));
+    res.json({ ok: true });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── Project memory ──────────────────────────────────────────
+
+apiRouter.get("/projects/:projectId/memory", async (req: Request, res: Response) => {
+  try {
+    const userId = query(req, "userId");
+    if (!userId) { res.status(400).json({ error: "userId query param is required" }); return; }
+    const content = await readProjectMemory(userId, param(req, "projectId"));
+    res.json({ content, ...projectMemoryUsage(content), warnRatio: PROJECT_MEMORY_WARN_RATIO });
+  } catch (err: any) { res.status(500).json({ error: err.message }); }
+});
+
+apiRouter.put("/projects/:projectId/memory", async (req: Request, res: Response) => {
+  try {
+    const { userId, content } = req.body;
+    if (!userId) { res.status(400).json({ error: "userId is required" }); return; }
+    if (typeof content !== "string") { res.status(400).json({ error: "content must be a string" }); return; }
+    const saved = await writeProjectMemory(userId, param(req, "projectId"), content);
+    res.json({ ok: true, content: saved, ...projectMemoryUsage(saved) });
+  } catch (err: any) {
+    // Reject over-budget writes rather than truncating — silently dropping the
+    // user's text is worse than making them prune it.
+    if (err instanceof ProjectMemoryTooLargeError) {
+      res.status(400).json({ error: err.message, code: err.code, used: err.used, max: err.max });
+      return;
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+apiRouter.delete("/projects/:projectId/memory", async (req: Request, res: Response) => {
+  try {
+    const userId = req.body?.userId || query(req, "userId");
+    if (!userId) { res.status(400).json({ error: "userId is required" }); return; }
+    await writeProjectMemory(userId, param(req, "projectId"), "");
     res.json({ ok: true });
   } catch (err: any) { res.status(500).json({ error: err.message }); }
 });

@@ -111,6 +111,14 @@ export const userPaths = {
  */
 export const PROJECT_ICON_FILENAME = ".vca-icon.png";
 
+/**
+ * Per-project agent memory. Deliberately NOT dot-prefixed: unlike the .vca-*
+ * machine state, this is a human-readable document that must travel with the
+ * repo (auto-commit, clone, project export) exactly like usecase.md and the
+ * template's CLAUDE.md.
+ */
+export const PROJECT_MEMORY_FILENAME = "project.md";
+
 export const projectPaths = {
   workspace:           (userId: string, projectId: string) => path.join(WORKSPACES_ROOT, userId, projectId),
   projectYaml:         (userId: string, projectId: string) => path.join(WORKSPACES_ROOT, userId, projectId, "project.yaml"),
@@ -122,6 +130,9 @@ export const projectPaths = {
   deployment:          (userId: string, projectId: string) => path.join(WORKSPACES_ROOT, userId, projectId, ".vca-deployment.json"),
   component:           (userId: string, projectId: string) => path.join(WORKSPACES_ROOT, userId, projectId, ".vca-component.json"),
   requirements:        (userId: string, projectId: string) => path.join(WORKSPACES_ROOT, userId, projectId, ".vca-requirements.json"),
+  // Injected into the system prompt as <project_memory> — see
+  // composeMemoryBlock in agent-manager.ts.
+  projectMemory:       (userId: string, projectId: string) => path.join(WORKSPACES_ROOT, userId, projectId, PROJECT_MEMORY_FILENAME),
   activeSkills:        (userId: string, projectId: string) => path.join(WORKSPACES_ROOT, userId, projectId, ".vca-active-skills.json"),
   projectSkillsDir:    (userId: string, projectId: string) => path.join(WORKSPACES_ROOT, userId, projectId, ".vca-skills"),
   // Template-delivered "project skills" live under the committed .vca/ hook dir

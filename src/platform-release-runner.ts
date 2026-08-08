@@ -662,6 +662,9 @@ files:
   - "!**/*.map"
   - "!**/.git/**"
   - "!**/.vca-*"
+  # Agent memory is committed with the project (so it survives a clone) but can
+  # hold internal notes and user preferences — keep it out of shipped installers.
+  - "!**/project.md"
   - "!**/release/**"
   - "!**/win-unpacked/**"
   - "!**/mac/**"

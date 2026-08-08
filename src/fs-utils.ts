@@ -37,6 +37,21 @@ export async function atomicWriteJson(filePath: string, value: unknown, indent?:
   }
 }
 
+/**
+ * Atomic text write — same staging/rename guarantee as atomicWriteJson, for
+ * files whose content is already a string (project.md, diagram .md, …).
+ */
+export async function atomicWriteText(filePath: string, text: string): Promise<void> {
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  await fs.writeFile(tmp, text, "utf-8");
+  try {
+    await fs.rename(tmp, filePath);
+  } catch (err) {
+    try { await fs.unlink(tmp); } catch { /* ignore */ }
+    throw err;
+  }
+}
+
 /** Recursively copy a directory tree, skipping .git and node_modules. */
 export async function copyDir(src: string, dest: string): Promise<void> {
   const entries = await fs.readdir(src, { withFileTypes: true });
