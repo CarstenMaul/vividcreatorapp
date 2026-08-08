@@ -268,7 +268,7 @@ import {
   type ClientEnvVar,
 } from "../env-vars-store.js";
 import {
-  readUserPrefs,
+  readUserPrefsRecord,
   writeUserPrefs,
   type UserPrefs,
 } from "../user-prefs.js";
@@ -1165,8 +1165,10 @@ apiRouter.get("/users/:userId/projects", async (req: Request, res: Response) => 
 // session's own userId, so no extra admin gate is needed here.
 apiRouter.get("/users/:userId/prefs", async (req: Request, res: Response) => {
   try {
-    const prefs = await readUserPrefs(param(req, "userId"));
-    res.json({ prefs });
+    // isNew = no prefs file yet, i.e. this user's first launch. The client
+    // uses it to apply one-time defaults (desktop language) exactly once.
+    const { prefs, exists } = await readUserPrefsRecord(param(req, "userId"));
+    res.json({ prefs, isNew: !exists });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

@@ -48,15 +48,26 @@ function coerce(raw: unknown): UserPrefs {
   };
 }
 
-export async function readUserPrefs(userId: string): Promise<UserPrefs> {
+/**
+ * Prefs plus whether the file was actually there. `exists: false` means this
+ * user has never had prefs written — the client uses it as the "first launch"
+ * signal for one-time defaults such as picking up the desktop language. A
+ * present-but-unreadable file counts as existing, so a corrupt record is never
+ * mistaken for a brand-new user.
+ */
+export async function readUserPrefsRecord(userId: string): Promise<{ prefs: UserPrefs; exists: boolean }> {
   try {
     const text = await fs.readFile(userPaths.prefs(userId), "utf-8");
-    return coerce(JSON.parse(text));
+    return { prefs: coerce(JSON.parse(text)), exists: true };
   } catch (err: any) {
-    if (err?.code === "ENOENT") return { ...DEFAULTS };
+    if (err?.code === "ENOENT") return { prefs: { ...DEFAULTS }, exists: false };
     console.warn(`[user-prefs] failed to read ${userId}:`, err);
-    return { ...DEFAULTS };
+    return { prefs: { ...DEFAULTS }, exists: true };
   }
+}
+
+export async function readUserPrefs(userId: string): Promise<UserPrefs> {
+  return (await readUserPrefsRecord(userId)).prefs;
 }
 
 export async function writeUserPrefs(userId: string, updates: Partial<UserPrefs>): Promise<UserPrefs> {

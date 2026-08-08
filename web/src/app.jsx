@@ -7324,6 +7324,23 @@ const LANGS = [
   { code: "pl", label: "Polski" },
 ];
 
+// The desktop/browser locale, mapped onto a language VCA actually ships. Walks
+// the user's ordered preference list and matches on the primary subtag, so
+// "de-AT" picks German and "pt-BR" falls through to the next candidate;
+// English when nothing matches. Used as the startup default and, on a user's
+// very first launch, written to their prefs as the initial choice.
+function detectPreferredLang() {
+  const nav = typeof navigator !== "undefined" ? navigator : null;
+  if (!nav) return "en";
+  const tags = Array.isArray(nav.languages) && nav.languages.length ? nav.languages : [nav.language];
+  for (const tag of tags) {
+    if (typeof tag !== "string") continue;
+    const primary = tag.toLowerCase().split("-")[0];
+    if (LANGS.some((l) => l.code === primary)) return primary;
+  }
+  return "en";
+}
+
 const THINKING_LEVELS = [
   { value: "off",     labelKey: "settings.thinkingOff",     Icon: CircleX,   disabled: true },
   { value: "minimal", labelKey: "settings.thinkingMinimal", Icon: Circle,    disabled: true },
@@ -17676,7 +17693,10 @@ export function App() {
   // the backend fills them from the stored settings.
   const [apiKey, setApiKey] = useState("");
   const [theme, setTheme] = useState("light");
-  const [lang, setLang] = useState("en");
+  // Starts at the desktop locale so the login screen — rendered before any
+  // user, and therefore before any stored pref — is already in the right
+  // language. Prefs hydration below replaces it with the user's stored choice.
+  const [lang, setLang] = useState(detectPreferredLang);
   const t = useMemo(() => window.__vca_i18n.createT(lang), [lang]);
 
   const [llmProvider, setLlmProvider] = useState("");
@@ -17737,8 +17757,22 @@ export function App() {
         if (cancelled) return;
         const p = r?.prefs || {};
         if (typeof p.theme === "string") setTheme(p.theme);
-        if (typeof p.lang === "string") setLang(p.lang);
         if (typeof p.thinkingLevel === "string") setThinkingLevel(p.thinkingLevel);
+        if (r?.isNew) {
+          // First launch for this user: adopt the desktop language and write it
+          // straight away. Persisting here — rather than leaving it to the
+          // autosave, which only fires on a change — is what makes this a
+          // one-time default: from the next launch the stored value wins, even
+          // when the user deliberately switches to English on a German machine.
+          const detected = detectPreferredLang();
+          setLang(detected);
+          api(`/users/${encodeURIComponent(userId)}/prefs`, {
+            method: "PUT",
+            body: JSON.stringify({ lang: detected }),
+          }).catch((err) => console.warn("[user-prefs] failed to persist detected language:", err));
+        } else if (typeof p.lang === "string") {
+          setLang(p.lang);
+        }
       } catch { /* fall back to component defaults */ }
       finally { userPrefsHydratedRef.current = true; }
     })();
