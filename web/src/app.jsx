@@ -10679,7 +10679,10 @@ function formatTemplateDeployDefault(t, dep) {
   return parts.join(" · ");
 }
 
-function SettingsDialog({ open, onOpenChange }) {
+// `initialTab` picks the tab the dialog lands on when it opens — the setup
+// wizard's "I already have a config file" link uses it to drop the admin
+// straight into Config Export/Import. Defaults to the AI Model Config tab.
+function SettingsDialog({ open, onOpenChange, initialTab }) {
   const { apiKey, setApiKey, llmProvider, setLlmProvider, llmModelId, setLlmModelId, llmEndpoint, setLlmEndpoint, llmApiVersion, setLlmApiVersion, imageProvider, setImageProvider, imageModelId, setImageModelId, imageApiKey, setImageApiKey, serverManaged, serverConfig, imageServerManaged, userId, isAdmin, authEnabled, llmConfigured, reloadServerConfig, openSetup, t, lang, setLang } = useContext(AppContext);
   // Anchors the "configure an LLM provider" onboarding tooltip when the
   // dialog opens with no provider set yet (first run, or admin cancelled
@@ -11012,8 +11015,8 @@ function SettingsDialog({ open, onOpenChange }) {
 
   const [activeTab, setActiveTab] = useState("general");
   useEffect(() => {
-    if (open) setActiveTab("general");
-  }, [open]);
+    if (open) setActiveTab(initialTab || "general");
+  }, [open, initialTab]);
 
   // Settings > Skills tab: platform-wide system skills (git-synced + admin-authored).
   const [systemSkillsAdmin, setSystemSkillsAdmin] = useState([]);
@@ -17760,6 +17763,10 @@ export function App() {
   const { onboardingStep, advanceOnboarding, dismissOnboarding } = useOnboarding();
 
   const [showSettings, setShowSettings] = useState(false);
+  // Tab the Settings dialog opens on. Everything but the setup wizard's
+  // "I already have a config file" link leaves it at the default; it resets
+  // when the dialog closes so the next plain open lands on AI Model Config.
+  const [settingsTab, setSettingsTab] = useState("general");
   const [showSetupWizard, setShowSetupWizard] = useState(false);
   const [showNotConfigured, setShowNotConfigured] = useState(false);
   // Session-scoped, not localStorage: a dismissed wizard shouldn't reappear in
@@ -17864,6 +17871,7 @@ export function App() {
     setupSkippedRef.current = false;
     try { sessionStorage.removeItem("vca-setup-skipped"); } catch { /* private mode */ }
     setShowSettings(false);
+    setSettingsTab("general"); // closing this way skips onOpenChange's reset
     setShowSetupWizard(true);
   }, [isAdmin]);
 
@@ -18857,12 +18865,16 @@ export function App() {
             <SetupWizard
               onDone={() => setShowSetupWizard(false)}
               onSkip={skipSetup}
-              onOpenSettings={() => { skipSetup(); setShowSettings(true); }}
+              onOpenSettings={() => { skipSetup(); setSettingsTab("configTransfer"); setShowSettings(true); }}
             />
           )}
           <LlmNotConfiguredNotice open={showNotConfigured} onOpenChange={setShowNotConfigured} />
 
-          <SettingsDialog open={showSettings} onOpenChange={setShowSettings} />
+          <SettingsDialog
+            open={showSettings}
+            initialTab={settingsTab}
+            onOpenChange={(v) => { setShowSettings(v); if (!v) setSettingsTab("general"); }}
+          />
           <NewProjectDialog open={showNewProject} onOpenChange={setShowNewProject} />
           <ProjectsGalleryDialog open={showProjectsGallery} onOpenChange={setShowProjectsGallery} />
           <CommitsDialog open={showCommits} onOpenChange={setShowCommits} />
